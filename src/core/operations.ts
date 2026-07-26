@@ -3318,6 +3318,57 @@ const sync_brain: Operation = {
   cliHints: { name: 'sync', hidden: true },
 };
 
+const run_dream_cycle: Operation = {
+  name: 'run_dream_cycle',
+  description:
+    'Run the GBrain maintenance cycle inside the serving process. Uses only the configured/default source path; remote callers cannot supply a host filesystem path.',
+  params: {
+    phases: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Optional allowlisted cycle phases. Omit to run the full configured cycle.',
+    },
+    dry_run: { type: 'boolean', description: 'Preview without filesystem or database writes' },
+  },
+  mutating: true,
+  scope: 'admin',
+  handler: async (ctx, p) => {
+    const { ALL_PHASES, runCycle } = await import('./cycle.ts');
+    const requested = p.phases as unknown;
+    let phases: (typeof ALL_PHASES)[number][] | undefined;
+    if (requested !== undefined) {
+      if (!Array.isArray(requested)) {
+        throw new OperationError('invalid_params', 'Invalid phases: expected an array of cycle phase names.');
+      }
+      const allowed = new Set<string>(ALL_PHASES);
+      const invalid = requested.filter((phase): boolean => typeof phase !== 'string' || !allowed.has(phase));
+      if (invalid.length > 0) {
+        throw new OperationError(
+          'invalid_params',
+          `Invalid cycle phase(s): ${invalid.map(String).join(', ')}.`,
+        );
+      }
+      phases = requested as (typeof ALL_PHASES)[number][];
+    }
+
+    const { getDefaultSourcePath } = await import('./source-resolver.ts');
+    const brainDir = (await ctx.engine.getConfig('sync.repo_path'))
+      ?? (await getDefaultSourcePath(ctx.engine))
+      ?? null;
+    const yieldToLoop = async () => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+
+    return runCycle(ctx.engine, {
+      brainDir,
+      dryRun: ctx.dryRun || (p.dry_run as boolean) || false,
+      phases,
+      pull: false,
+      sourceId: ctx.sourceId,
+      yieldBetweenPhases: yieldToLoop,
+      yieldDuringPhase: yieldToLoop,
+    });
+  },
+};
+
 // --- Raw Data ---
 
 const put_raw_data: Operation = {
@@ -7290,7 +7341,7 @@ export const operations: Operation[] = [
   // v0.41.19.0: thin-client `gbrain status` payload (admin-scope, sync + cycle only)
   get_status_snapshot,
   // Sync
-  sync_brain,
+  sync_brain, run_dream_cycle,
   // Raw data
   put_raw_data, get_raw_data,
   // Resolution & chunks
