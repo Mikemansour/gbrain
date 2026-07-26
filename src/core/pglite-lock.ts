@@ -24,17 +24,11 @@ const LOCK_FILE = 'lock';
 // LIVE holder (embed jobs run for many minutes) is never mistaken for stale.
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
-// #2058: a holder whose heartbeat refreshed within this window is ALIVE and is
-// NEVER stolen, regardless of how old the lock is. Only a holder that STOPPED
-// refreshing past this grace (hung, crashed without cleanup, or a PID since
-// reused by an unrelated process) is reaped. Pairing heartbeat-age with PID
-// liveness is what defeats both the WAL-corruption bug (stealing a live
-// writer) AND the PID-reuse false-positive (a recycled PID reading as "alive").
-// Env-overridable as an incident escape hatch, matching the sync-lock knobs.
-function stealGraceMs(): number {
-  const env = parseInt(process.env.GBRAIN_PGLITE_LOCK_STEAL_GRACE_SECONDS ?? '', 10);
-  return Number.isFinite(env) && env > 0 ? env * 1000 : 10 * 60 * 1000; // default 600s
-}
+// A holder whose PID is alive is NEVER stolen, regardless of heartbeat age.
+// PGLite/WASM is strictly single-writer, and long synchronous imports or
+// CHECKPOINTs can block the JS event loop (and therefore this heartbeat).
+// Treating a stale heartbeat as a dead holder let a second process open the
+// data directory and corrupt WAL. Only a dead PID is safe to reap.
 
 export interface LockHandle {
   lockDir: string;
@@ -47,11 +41,11 @@ export interface LockHandle {
   heartbeat?: ReturnType<typeof setInterval>;
   lockPath?: string;
   /**
-   * #2058 (codex): our ownership token (`<pid>:<acquired_at>`). If we stall
-   * past the steal grace, another process can reap + re-acquire. When we
-   * resume, the heartbeat and release MUST verify the on-disk lock is STILL
-   * ours before touching it — otherwise a resumed stale holder would refresh
-   * or delete the NEW owner's live lock, re-opening the concurrent-writer hole.
+   * #2058 (codex): our ownership token (`<pid>:<acquired_at>`). If the lock is
+   * externally removed or replaced, the heartbeat and release MUST verify the
+   * on-disk lock is STILL ours before touching it — otherwise an old handle
+   * could refresh or delete the NEW owner's live lock, re-opening the
+   * concurrent-writer hole.
    */
   ownerToken?: string;
 }
@@ -62,12 +56,10 @@ function tokenOf(lockData: { pid?: unknown; acquired_at?: unknown }): string {
 }
 
 /**
- * #2058: keep the held lock's `refreshed_at` current so a concurrent acquirer
- * can tell a live, working holder from a hung/dead one. Best-effort: if the
- * file is gone (we're being reaped) the write simply fails. `.unref()` so the
- * timer never keeps the process alive on its own. Ownership-checked: if the
- * on-disk lock is no longer ours (we were reaped past grace and replaced), stop
- * the heartbeat instead of clobbering the new owner's lock.
+ * #2058: keep the held lock's `refreshed_at` current for diagnostics.
+ * Best-effort: if the file is gone, the write simply fails. `.unref()` keeps
+ * the timer from holding the process open. Ownership-checked: if the on-disk
+ * lock is no longer ours, stop instead of clobbering the new owner's lock.
  */
 function startHeartbeat(lockPath: string, ownerToken: string): ReturnType<typeof setInterval> {
   const timer = setInterval(() => {
@@ -134,25 +126,15 @@ export async function acquireLock(dataDir: string | undefined, opts?: { timeoutM
       try {
         const lockData = JSON.parse(readFileSync(lockPath, 'utf-8'));
         const lockPid = lockData.pid as number;
-        const lockTime = lockData.acquired_at as number;
-
-        // #2058: classify by PID liveness AND heartbeat freshness. A holder
-        // that is alive AND refreshed its heartbeat within the steal grace is
-        // genuinely working (e.g. a multi-minute embed) and is NEVER reaped —
-        // force-removing it here is what corrupted the single-writer WAL.
+        // PGLite is single-writer. A live PID is never reaped: a synchronous
+        // WASM operation can make its JS heartbeat look stale while it is
+        // still actively writing the database.
         const alive = isProcessAlive(lockPid);
-        const lastRefresh = (lockData.refreshed_at as number | undefined) ?? lockTime;
-        const sinceRefresh = Date.now() - lastRefresh;
         if (!alive) {
-          // Holder process is gone — reap.
+          // Holder process is gone — reap and try to acquire.
           try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* race condition, try again */ }
-        } else if (sinceRefresh > stealGraceMs()) {
-          // PID is alive but the heartbeat stopped past the grace window:
-          // either the holder hung, or this PID was reused by an unrelated
-          // process (the real holder died and stopped refreshing). Reap.
-          try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* race condition */ }
         } else {
-          // Live holder refreshing within grace — wait and retry.
+          // Live holder — wait and time out rather than risk concurrent access.
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
@@ -166,7 +148,7 @@ export async function acquireLock(dataDir: string | undefined, opts?: { timeoutM
     try {
       mkdirSync(lockDir, { recursive: false });
       // We got the lock — write our PID. #2058: seed `refreshed_at` and start
-      // the heartbeat so this holder reads as alive-and-working to others.
+      // the diagnostic heartbeat.
       const lockPath = join(lockDir, LOCK_FILE);
       const now = Date.now();
       writeFileSync(lockPath, JSON.stringify({

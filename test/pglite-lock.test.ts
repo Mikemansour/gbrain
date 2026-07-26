@@ -3,7 +3,6 @@ import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { acquireLock, releaseLock, type LockHandle } from '../src/core/pglite-lock';
-import { withEnv } from './helpers/with-env.ts';
 
 const TEST_DIR = join(tmpdir(), 'gbrain-lock-test-' + process.pid);
 
@@ -101,7 +100,7 @@ describe('pglite-lock', () => {
   });
 });
 
-describe('pglite-lock #2058 heartbeat + steal-grace', () => {
+describe('pglite-lock heartbeat + live-owner safety', () => {
   beforeEach(() => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -133,30 +132,18 @@ describe('pglite-lock #2058 heartbeat + steal-grace', () => {
     expect(existsSync(join(TEST_DIR, '.gbrain-lock'))).toBe(true);
   });
 
-  test('a LIVE PID whose heartbeat went stale past the grace window IS reaped', async () => {
-    // PID is alive (our own) but hasn't refreshed in 20min (> 600s grace):
-    // hung holder, or a reused PID whose real holder is gone. Reap + acquire.
+  test('[REGRESSION] a LIVE PID with a STALE heartbeat is NOT stolen', async () => {
+    // A synchronous WASM import/CHECKPOINT can block the JS heartbeat while
+    // the process is still writing. Reaping it lets a second PGLite process
+    // corrupt WAL, so PID liveness is the only automatic reap signal.
     writeHolder({ pid: process.pid, acquiredAgoMs: 25 * 60_000, refreshedAgoMs: 20 * 60_000 });
 
-    const lock = await acquireLock(TEST_DIR, { timeoutMs: 2000 });
-    expect(lock.acquired).toBe(true);
-    await releaseLock(lock);
-  });
-
-  test('GBRAIN_PGLITE_LOCK_STEAL_GRACE_SECONDS tunes the grace window', async () => {
-    // withEnv keeps the process-global mutation isolated across shard files.
-    await withEnv({ GBRAIN_PGLITE_LOCK_STEAL_GRACE_SECONDS: '5' }, async () => {
-      // Refreshed 30s ago — fresh under the 600s default, STALE under 5s.
-      writeHolder({ pid: process.pid, acquiredAgoMs: 60_000, refreshedAgoMs: 30_000 });
-      const lock = await acquireLock(TEST_DIR, { timeoutMs: 2000 });
-      expect(lock.acquired).toBe(true);
-      await releaseLock(lock);
-    });
+    await expect(acquireLock(TEST_DIR, { timeoutMs: 1200 })).rejects.toThrow(/Timed out/);
+    expect(existsSync(join(TEST_DIR, '.gbrain-lock'))).toBe(true);
   });
 
   test('[REGRESSION] releaseLock does NOT remove a lock that was stolen + re-acquired by another process', async () => {
-    // We acquire, then simulate a steal: another process reaped us past grace
-    // and now owns the lock (different pid + acquired_at). Our releaseLock must
+    // We acquire, then simulate external lock replacement. Our releaseLock must
     // NOT delete their live lock — doing so would let a third process in
     // alongside the new owner (the #2058 corruption class).
     const lock: LockHandle = await acquireLock(TEST_DIR);
