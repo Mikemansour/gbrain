@@ -2569,8 +2569,12 @@ describe('MinionWorker: self-health-check behavior (v0.22.14)', () => {
     worker.on('unhealthy', (info) => { events.push(info); });
 
     const startPromise = worker.start();
-    // 3 ticks at 30ms = 90ms; give extra slack.
-    await new Promise(r => setTimeout(r, 250));
+    // Wait for the behavior under test rather than assuming three interval
+    // callbacks fit into a fixed wall-clock sleep. Under a saturated CI host,
+    // a correct 30ms timer can be delayed by hundreds of milliseconds.
+    for (let i = 0; i < 40 && probeCount < 3; i++) {
+      await new Promise(r => setTimeout(r, 50));
+    }
     worker.stop();
     await startPromise;
 

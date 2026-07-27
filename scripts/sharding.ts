@@ -244,7 +244,23 @@ async function main(): Promise<number> {
     console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
     return 1;
   }
-  const shards = partition(files, weights, total);
+  let fallbackWeight: number | undefined;
+  const fallbackRaw = process.env.GBRAIN_SHARD_FALLBACK_WEIGHT;
+  if (fallbackRaw !== undefined) {
+    fallbackWeight = Number(fallbackRaw);
+    if (!Number.isFinite(fallbackWeight) || fallbackWeight < 0) {
+      console.error(
+        `error: GBRAIN_SHARD_FALLBACK_WEIGHT must be a non-negative finite number, got ${JSON.stringify(fallbackRaw)}`,
+      );
+      return 2;
+    }
+  }
+  const shards = partition(
+    files,
+    weights,
+    total,
+    fallbackWeight === undefined ? {} : { fallbackWeight },
+  );
   for (const f of shards[idx - 1]!) {
     process.stdout.write(`${f}\n`);
   }

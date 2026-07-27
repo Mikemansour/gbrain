@@ -68,6 +68,79 @@ type PGLiteDB = PGlite;
 // a sidecar `.version` file; on mismatch we silently fall through to a normal
 // initSchema (snapshot is just an optimization, never authoritative).
 let _snapshotWarnLogged = false;
+export function isFreshSnapshotDataDir(dataDir: string | undefined): boolean {
+  if (!dataDir) return true;
+  try {
+    // acquireLock() creates this directory before snapshot selection. A fresh
+    // persistent test brain therefore contains only its owned lock directory.
+    // Any other entry means real database state exists and must never be
+    // replaced by a fixture.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('node:fs') as typeof import('node:fs');
+    return fs.readdirSync(dataDir).every(entry => entry === '.gbrain-lock');
+  } catch {
+    return false;
+  }
+}
+
+function copyPersistentSnapshot(snapshotDir: string, dataDir: string): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('node:fs') as typeof import('node:fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require('node:path') as typeof import('node:path');
+    if (!fs.statSync(snapshotDir).isDirectory()) return false;
+    for (const entry of fs.readdirSync(snapshotDir)) {
+      if (entry === '.gbrain-lock') continue;
+      fs.cpSync(
+        path.join(snapshotDir, entry),
+        path.join(dataDir, entry),
+        { recursive: true, mode: fs.constants.COPYFILE_FICLONE },
+      );
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveSnapshotFixture(
+  legacyPath: string,
+  legacyDir: string | undefined,
+  catalogDir: string | undefined,
+  embeddingDimensions: number,
+  embeddingModel: string,
+): { tarPath: string; persistentDir?: string } {
+  if (!catalogDir) return { tarPath: legacyPath, persistentDir: legacyDir };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('node:fs') as typeof import('node:fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require('node:path') as typeof import('node:path');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const crypto = require('node:crypto') as typeof import('node:crypto');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { MIGRATIONS } = require('./migrate.ts') as typeof import('./migrate.ts');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { PGLITE_SCHEMA_SQL } = require('./pglite-schema.ts') as typeof import('./pglite-schema.ts');
+    const hash = computeSnapshotSchemaHash(
+      MIGRATIONS,
+      PGLITE_SCHEMA_SQL,
+      crypto,
+      embeddingDimensions,
+      embeddingModel,
+    );
+    const tarPath = path.join(catalogDir, `${hash}.tar`);
+    if (fs.existsSync(tarPath)) {
+      return {
+        tarPath,
+        persistentDir: path.join(catalogDir, `${hash}.dir`),
+      };
+    }
+  } catch { /* fall back to the legacy single fixture */ }
+  return { tarPath: legacyPath, persistentDir: legacyDir };
+}
+
 function tryLoadSnapshot(
   snapshotPath: string,
   embeddingDimensions: number,
@@ -110,6 +183,10 @@ function tryLoadSnapshot(
       if (!_snapshotWarnLogged) {
         // eslint-disable-next-line no-console
         console.warn(`[pglite] snapshot stale (schema hash mismatch) — using normal init. Rebuild with: bun run build:pglite-snapshot`);
+        if (process.env.GBRAIN_TEST_SNAPSHOT_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.warn(`[pglite] snapshot debug: expected=${expectedHash.slice(0, 16)} actual=${actualHash.slice(0, 16)} model=${embeddingModel} dimensions=${embeddingDimensions}`);
+        }
         _snapshotWarnLogged = true;
       }
       return null;
@@ -256,6 +333,10 @@ export class PGLiteEngine implements BrainEngine {
 
   // Lifecycle
   async connect(config: EngineConfig): Promise<void> {
+    // Snapshot eligibility belongs to this connection attempt. In particular,
+    // reconnecting an existing persistent brain must not inherit a prior
+    // connection's fast-path marker.
+    this._snapshotLoaded = false;
     this._savedConfig = config; // #2034: remember for reconnect()
     const dataDir = config.database_path || undefined; // undefined = in-memory
 
@@ -266,13 +347,13 @@ export class PGLiteEngine implements BrainEngine {
       throw new Error('Could not acquire PGLite lock. Another gbrain process is using the database.');
     }
 
-    // Tier 3: optional snapshot fast-restore. Only applies to in-memory
-    // engines (no persistent dataDir). The snapshot was built from a fresh
-    // `initSchema()` run; if the version file matches the current MIGRATIONS
-    // hash, load the dump and skip the schema replay. Mismatch or missing
-    // file silently falls back to normal init.
+    // Tier 3: optional snapshot fast-restore. It applies to in-memory engines
+    // and explicitly fresh persistent directories (the latter are common in
+    // E2E tests). Existing persistent brains are never eligible. The snapshot
+    // was built from a fresh `initSchema()` run; if the version file matches
+    // the current schema inputs, load the dump and skip schema replay.
     let loadDataDir: Blob | undefined;
-    if (!dataDir && process.env.GBRAIN_PGLITE_SNAPSHOT) {
+    if (process.env.GBRAIN_PGLITE_SNAPSHOT) {
       let snapshotDimensions = DEFAULT_EMBEDDING_DIMENSIONS;
       let snapshotModel = DEFAULT_EMBEDDING_MODEL;
       try {
@@ -280,13 +361,28 @@ export class PGLiteEngine implements BrainEngine {
         snapshotDimensions = gw.getEmbeddingDimensions();
         snapshotModel = gw.getEmbeddingModel() || snapshotModel;
       } catch { /* gateway not configured — use defaults */ }
-      const snapshotResult = tryLoadSnapshot(
+      const fixture = resolveSnapshotFixture(
         process.env.GBRAIN_PGLITE_SNAPSHOT,
+        process.env.GBRAIN_PGLITE_SNAPSHOT_DIR,
+        process.env.GBRAIN_PGLITE_SNAPSHOT_CATALOG,
         snapshotDimensions,
         snapshotModel,
       );
-      if (snapshotResult) {
+      const snapshotResult = tryLoadSnapshot(
+        fixture.tarPath,
+        snapshotDimensions,
+        snapshotModel,
+      );
+      if (!dataDir && snapshotResult) {
         loadDataDir = snapshotResult;
+        this._snapshotLoaded = true;
+      } else if (
+        dataDir
+        && snapshotResult
+        && fixture.persistentDir
+        && isFreshSnapshotDataDir(dataDir)
+        && copyPersistentSnapshot(fixture.persistentDir, dataDir)
+      ) {
         this._snapshotLoaded = true;
       }
     }
@@ -382,8 +478,11 @@ export class PGLiteEngine implements BrainEngine {
 
   async initSchema(): Promise<void> {
     // Tier 3: snapshot was loaded into PGlite — schema + migrations already
-    // applied. Nothing to do. Returns immediately.
+    // applied. Consume the marker before returning: later initSchema() calls
+    // must remain authoritative so upgrade/recovery paths can replay a schema
+    // that changed after connect().
     if (this._snapshotLoaded) {
+      this._snapshotLoaded = false;
       return;
     }
     // Pre-schema bootstrap: add forward-referenced state the embedded schema
@@ -3053,7 +3152,8 @@ export class PGLiteEngine implements BrainEngine {
              array_agg(DISTINCT n.last_link_type)
                FILTER (WHERE n.last_link_type IS NOT NULL) AS via_link_types,
              (array_agg(array_to_string(n.path, chr(9))
-               ORDER BY n.depth ASC, array_length(n.path, 1) ASC))[1] AS path_str,
+               ORDER BY n.depth ASC, array_length(n.path, 1) ASC,
+                        array_to_string(n.path, chr(9)) ASC))[1] AS path_str,
              (SELECT cc.id FROM content_chunks cc
                WHERE cc.page_id = n.id ORDER BY cc.chunk_index ASC LIMIT 1) AS canonical_chunk_id
       FROM walk n

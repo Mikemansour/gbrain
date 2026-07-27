@@ -143,10 +143,11 @@ describe('event-loop yield keeps timers alive (commit 8 mechanism)', () => {
       // Mirror the import loop's maybeYield: setTimeout(0) enters the timers
       // phase, so the setInterval heartbeat can fire mid-loop. (A setImmediate
       // loop starves the timers phase in Bun — the reason maybeYield uses
-      // setTimeout, not setImmediate.) Bound by wall-clock so the 2ms interval
-      // has real time to fire.
-      const start = Date.now();
-      while (Date.now() - start < 40) {
+      // setTimeout, not setImmediate.) Use a fixed number of yields rather
+      // than a wall-clock loop: under full CI load one delayed callback can
+      // consume the entire wall-clock budget before the interval gets its
+      // next timers-phase turn.
+      for (let i = 0; i < 100 && ticks === 0; i++) {
         await new Promise<void>((r) => setTimeout(r, 0));
       }
     } finally {

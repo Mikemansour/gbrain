@@ -5695,6 +5695,7 @@ export function isDeadlockError(err: unknown): boolean {
 }
 
 export async function runMigrations(engine: BrainEngine): Promise<{ applied: number; current: number }> {
+  const quietProgress = process.env.GBRAIN_TEST_QUIET_MIGRATIONS === '1';
   const currentStr = await engine.getConfig('version');
   const current = parseInt(currentStr || '1', 10);
 
@@ -5731,14 +5732,16 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
 
   // Progress messages route to stderr so callers parsing stdout (e.g.
   // `gbrain jobs submit --json | jq`) aren't polluted by migration noise.
-  process.stderr.write(`  Schema version ${current} → ${LATEST_VERSION} (${pending.length} migration(s) pending)\n`);
+  if (!quietProgress) {
+    process.stderr.write(`  Schema version ${current} → ${LATEST_VERSION} (${pending.length} migration(s) pending)\n`);
+  }
 
   // Pre-flight: warn about connections that might block DDL
   await checkForBlockingConnections(engine);
 
   let applied = 0;
   for (const m of pending) {
-    process.stderr.write(`  [${m.version}] ${m.name}...\n`);
+    if (!quietProgress) process.stderr.write(`  [${m.version}] ${m.name}...\n`);
 
     // Pick SQL: engine-specific `sqlFor` wins over engine-agnostic `sql`.
     const sql = m.sqlFor?.[engine.kind] ?? m.sql;
@@ -5812,7 +5815,7 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
 
     // Update version after both SQL and handler succeed
     await engine.setConfig('version', String(m.version));
-    process.stderr.write(`  [${m.version}] ✓ ${m.name}\n`);
+    if (!quietProgress) process.stderr.write(`  [${m.version}] ✓ ${m.name}\n`);
     applied++;
   }
 

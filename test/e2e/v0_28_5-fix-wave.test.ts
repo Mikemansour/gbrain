@@ -42,6 +42,13 @@ import {
   embeddingMismatchMessage,
 } from '../../src/core/embedding-dim-check.ts';
 
+// These regression cases intentionally exercise empty/pre-init brains and
+// configure several schema dimensions after connect(). An initialized
+// snapshot would replace the historical states the tests are meant to prove.
+delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+delete process.env.GBRAIN_PGLITE_SNAPSHOT_DIR;
+delete process.env.GBRAIN_PGLITE_SNAPSHOT_CATALOG;
+
 describe('v0.28.5 cluster A — PGLite upgrade wedge regression', () => {
   test('pre-v0.20 brain (missing v0.20+v0.26.3+v0.27 columns) re-runs initSchema cleanly', async () => {
     const engine = new PGLiteEngine();

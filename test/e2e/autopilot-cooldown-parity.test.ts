@@ -41,7 +41,7 @@ function summarize(map: Map<string, { count: number }>): Record<string, number> 
 
 describe('failure-cooldown query — PGLite', () => {
   let engine: PGLiteEngine;
-  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); await seed(engine); }, 30000);
+  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); await seed(engine); }, 60000);
   afterAll(async () => { await engine.disconnect(); });
 
   test('groups failures by source, excludes completed + null-source', async () => {

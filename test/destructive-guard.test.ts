@@ -58,10 +58,10 @@ describe('assessDestructiveImpact', () => {
 
   beforeAll(async () => {
     engine = await setupBrain();
-  }, 30000);
+  }, 60000);
 
   afterAll(async () => {
-    await engine.disconnect();
+    if (engine) await engine.disconnect();
   });
 
   test('returns null for a non-existent source', async () => {
@@ -156,10 +156,10 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
 
   beforeAll(async () => {
     engine = await setupBrain();
-  }, 30000);
+  }, 60000);
 
   afterAll(async () => {
-    await engine.disconnect();
+    if (engine) await engine.disconnect();
   });
 
   test('softDeleteSource flips column shape + sets TTL', async () => {

@@ -18,7 +18,7 @@
 //
 // Re-run whenever you touch src/core/migrate.ts or src/schema.sql.
 
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync, copyFileSync, cpSync } from "node:fs";
 import { dirname } from "node:path";
 import * as crypto from "node:crypto";
 
@@ -29,46 +29,81 @@ import {
   DEFAULT_EMBEDDING_DIMENSIONS,
   DEFAULT_EMBEDDING_MODEL,
 } from "../src/core/ai/defaults.ts";
+import { configureGateway, resetGateway } from "../src/core/ai/gateway.ts";
 
-function computeSchemaHash(): string {
+function computeSchemaHash(model: string, dimensions: number): string {
   return computeSnapshotSchemaHash(
     MIGRATIONS,
     PGLITE_SCHEMA_SQL,
     crypto,
-    DEFAULT_EMBEDDING_DIMENSIONS,
-    DEFAULT_EMBEDDING_MODEL,
+    dimensions,
+    model,
   );
+}
+
+async function buildVariant(
+  model: string,
+  dimensions: number,
+  catalogDir: string,
+): Promise<{ hash: string; tarPath: string; versionPath: string; fixtureDir: string }> {
+  const schemaHash = computeSchemaHash(model, dimensions);
+  const tarPath = `${catalogDir}/${schemaHash}.tar`;
+  const versionPath = `${catalogDir}/${schemaHash}.version`;
+  const fixtureDir = `${catalogDir}/${schemaHash}.dir`;
+  mkdirSync(fixtureDir, { recursive: true });
+
+  console.log(`[build-pglite-snapshot] ${model}/${dimensions}d hash: ${schemaHash.slice(0, 16)}...`);
+  const engine = new PGLiteEngine();
+  configureGateway({ embedding_model: model, embedding_dimensions: dimensions, env: {} });
+
+  await engine.connect({ database_path: fixtureDir, engine: "pglite" });
+  console.log(`[build-pglite-snapshot] running initSchema (${MIGRATIONS.length} migrations)...`);
+  const t0 = Date.now();
+  await engine.initSchema();
+  console.log(`[build-pglite-snapshot] initSchema completed in ${Date.now() - t0}ms`);
+
+  const dump = await engine.db.dumpDataDir("none");
+  const buffer = Buffer.from(await dump.arrayBuffer());
+  writeFileSync(tarPath, buffer);
+  writeFileSync(versionPath, schemaHash + "\n");
+  await engine.disconnect();
+
+  console.log(`[build-pglite-snapshot] wrote ${tarPath} (${buffer.length} bytes) + ${fixtureDir}`);
+  return { hash: schemaHash, tarPath, versionPath, fixtureDir };
 }
 
 async function main() {
   const fixturePath = "test/fixtures/pglite-snapshot.tar";
   const versionPath = "test/fixtures/pglite-snapshot.version";
+  const fixtureDir = "test/fixtures/pglite-snapshot-dir";
+  const catalogDir = "test/fixtures/pglite-snapshot-catalog";
   mkdirSync(dirname(fixturePath), { recursive: true });
+  rmSync(fixtureDir, { recursive: true, force: true });
+  rmSync(catalogDir, { recursive: true, force: true });
+  mkdirSync(catalogDir, { recursive: true });
 
-  const schemaHash = computeSchemaHash();
-  console.log(`[build-pglite-snapshot] schema hash: ${schemaHash.slice(0, 16)}...`);
-  console.log(`[build-pglite-snapshot] booting PGLite (in-memory)...`);
-  const engine = new PGLiteEngine();
-
-  // Bypass the env-aware short-circuit: we WANT a real init here.
+  // Bypass the env-aware short-circuit: these are the authoritative builds.
   delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+  delete process.env.GBRAIN_PGLITE_SNAPSHOT_DIR;
+  delete process.env.GBRAIN_PGLITE_SNAPSHOT_CATALOG;
 
-  await engine.connect({});
-  console.log(`[build-pglite-snapshot] running initSchema (forward bootstrap + ${MIGRATIONS.length} migrations)...`);
-  const t0 = Date.now();
-  await engine.initSchema();
-  console.log(`[build-pglite-snapshot] initSchema completed in ${Date.now() - t0}ms`);
+  const defaultVariant = await buildVariant(
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_DIMENSIONS,
+    catalogDir,
+  );
+  await buildVariant(
+    "openai:text-embedding-3-large",
+    1536,
+    catalogDir,
+  );
+  resetGateway();
 
-  console.log(`[build-pglite-snapshot] dumping data dir...`);
-  const dump = await engine.db.dumpDataDir("none");
-  const buffer = Buffer.from(await dump.arrayBuffer());
-
-  writeFileSync(fixturePath, buffer);
-  writeFileSync(versionPath, schemaHash + "\n");
-  await engine.disconnect();
-
-  console.log(`[build-pglite-snapshot] wrote ${fixturePath} (${buffer.length} bytes)`);
-  console.log(`[build-pglite-snapshot] wrote ${versionPath}`);
+  // Preserve the legacy single-fixture paths for focused/local callers.
+  copyFileSync(defaultVariant.tarPath, fixturePath);
+  copyFileSync(defaultVariant.versionPath, versionPath);
+  cpSync(defaultVariant.fixtureDir, fixtureDir, { recursive: true });
+  console.log(`[build-pglite-snapshot] refreshed legacy default fixture paths`);
 }
 
 await main();

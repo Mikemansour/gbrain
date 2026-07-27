@@ -1138,13 +1138,13 @@ describeE2E('E2E: RLS Verification', () => {
       // this would error out with 42P01 and leave version at 23.
       const result = Bun.spawnSync({
         cmd: ['bun', 'run', 'src/cli.ts', 'init', '--non-interactive', '--url', process.env.DATABASE_URL!],
-        cwd: cliCwd, env: cliEnv(), timeout: 30_000,
+        cwd: cliCwd, env: cliEnv(), timeout: 60_000,
       });
       const stdout = new TextDecoder().decode(result.stdout);
       const stderr = new TextDecoder().decode(result.stderr);
 
       // Must succeed — no 42P01, no transaction rollback.
-      expect(result.exitCode).toBe(0);
+      expect(result.exitCode, `init output:\n${stderr}${stdout}`).toBe(0);
       expect(stderr + stdout).not.toMatch(/42P01|does not exist.*budget/i);
 
       // Version must have advanced PAST 24. Since v0.18.1, v25-v29 (v0.19.0
@@ -1208,7 +1208,7 @@ describeE2E('E2E: RLS Verification', () => {
         );
       }
     }
-  }, 60_000);
+  }, 90_000);
 });
 
 // ─────────────────────────────────────────────────────────────────

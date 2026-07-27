@@ -234,8 +234,9 @@ beforeAll(async () => {
     await importCodeFile(engine, `java/${n}.java`, generateJavaFile(n), { noEmbed: true });
   }
   // v0.41 D2 wave: 92-migration replay + SQL grammar load can push the
-  // default 5s beforeAll budget on slower CI runners; bump explicitly.
-}, 30000);
+  // Snapshot restore can cross 30s under the bounded-memory local CI fanout.
+  // Keep a finite hook budget while avoiding a load-induced false negative.
+}, 60000);
 
 afterAll(async () => {
   await engine.disconnect();

@@ -69,14 +69,18 @@ trap 'rm -rf "$E2E_TMP_ROOT"' EXIT
 # test behavior — making "hermetic" E2E non-hermetic and its failures
 # unreproducible across machines. Drop them before bun starts. This is a
 # DENYLIST of operator-context prefixes (not an allowlist rebuild), so PATH,
-# HOME, TMPDIR, CI, DATABASE_URL, and bun internals survive untouched. We keep
-# GBRAIN_HOME (just set above for HOME isolation); everything else GBRAIN_* is
-# an operator override the suite must not inherit. Adapts GStack's
-# buildHermeticEnv() allowlist to gbrain's shell E2E runner.
+# HOME, TMPDIR, CI, DATABASE_URL, and bun internals survive untouched. The
+# narrow exceptions below are paths/flags owned by the test harness itself;
+# none select an operator brain, source, endpoint, or credential.
 for _e2e_var in $(env | grep -oE '^(CONDUCTOR_|MCP_|OPENCLAW_|GBRAIN_)[A-Za-z0-9_]*' | sort -u); do
   case "$_e2e_var" in
     GBRAIN_HOME) ;;  # caller/per-file HOME isolation override — keep
     GBRAIN_TEST_DB) ;;  # ci-local's guarded, test-shaped schema-reset opt-in
+    GBRAIN_TEST_QUIET_MIGRATIONS) ;;  # output-only CI acceleration
+    GBRAIN_PGLITE_SNAPSHOT) ;;  # schema-hashed test fixture, never operator data
+    GBRAIN_PGLITE_SNAPSHOT_DIR) ;;  # persistent form of the same test fixture
+    GBRAIN_PGLITE_SNAPSHOT_CATALOG) ;;  # model/dimension fixture lookup
+    GBRAIN_TEST_SNAPSHOT_DEBUG) ;;  # opt-in fixture diagnostics
     *) unset "$_e2e_var" || true ;;
   esac
 done
@@ -96,10 +100,11 @@ else
   files=(test/e2e/*.test.ts)
 fi
 
-# SHARD env (e.g. SHARD=1/4) keeps every M-th file starting at index N (1-indexed).
-# Used by scripts/ci-local.sh to fan 4 shards in parallel against 4 postgres
-# containers. Sequential execution within a shard is preserved (the TRUNCATE
-# CASCADE no-race rationale at the top of this file still holds).
+# SHARD env (e.g. SHARD=1/4) selects one deterministic, weight-balanced shard.
+# scripts/sharding.ts uses measured weights for known long-tail files and a
+# conservative 10s fallback for new E2E files. Sequential execution within a
+# shard is preserved (the TRUNCATE CASCADE no-race rationale at the top of this
+# file still holds).
 if [ -n "${SHARD:-}" ]; then
   shard_n=${SHARD%/*}
   shard_m=${SHARD#*/}
@@ -109,14 +114,15 @@ if [ -n "${SHARD:-}" ]; then
     echo "ERROR: invalid SHARD=$SHARD (expected N/M with 1<=N<=M, both integers)" >&2
     exit 1
   fi
+  if ! shard_output=$(printf '%s\n' "${files[@]}" | \
+    GBRAIN_SHARD_FALLBACK_WEIGHT=10000 bun run scripts/sharding.ts "$shard_n" "$shard_m"); then
+    echo "ERROR: weighted E2E sharding failed for SHARD=$SHARD" >&2
+    exit 1
+  fi
   filtered=()
-  i=0
-  for f in "${files[@]}"; do
-    if [ $((i % shard_m + 1)) -eq "$shard_n" ]; then
-      filtered+=("$f")
-    fi
-    i=$((i + 1))
-  done
+  while IFS= read -r f; do
+    if [ -n "$f" ]; then filtered+=("$f"); fi
+  done <<< "$shard_output"
   # ${filtered[@]:-} avoids "unbound variable" under `set -u` when no files matched.
   files=("${filtered[@]:-}")
   # If the empty placeholder slipped in, drop it.
@@ -166,15 +172,20 @@ for f in "${files[@]}"; do
   if [ -n "${DATABASE_URL:-}" ]; then
     psql "$DATABASE_URL" -At -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid != pg_backend_pid() AND datname = current_database()" >/dev/null 2>&1 || true
   fi
-  # Hard outer timeout (180s per file). bun's --timeout is per-test; if a
+  # Hard outer timeout (240s per file, 420s for the migration-heavy mechanical
+  # suite). bun's --timeout is per-test; if a
   # PGLite WASM call hangs in beforeAll/afterAll, --timeout never fires and
   # the file wedges indefinitely. gtimeout/timeout SIGKILLs the file so the
   # suite advances. gtimeout (macOS via coreutils) preferred; timeout (Linux)
   # fallback; bare bun (no outer cap) if neither is installed.
+  FILE_TIMEOUT_SECONDS=240
+  if [ "$name" = "mechanical.test.ts" ]; then
+    FILE_TIMEOUT_SECONDS=420
+  fi
   if command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="gtimeout 180"
+    TIMEOUT_CMD="gtimeout $FILE_TIMEOUT_SECONDS"
   elif command -v timeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="timeout 180"
+    TIMEOUT_CMD="timeout $FILE_TIMEOUT_SECONDS"
   else
     TIMEOUT_CMD=""
   fi

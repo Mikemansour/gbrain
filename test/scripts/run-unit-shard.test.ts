@@ -20,8 +20,8 @@ import { resolve } from 'path';
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
 const SHARD_SH = resolve(REPO_ROOT, 'scripts/run-unit-shard.sh');
 
-function dryRunList(): string[] {
-  const out = execFileSync('bash', [SHARD_SH, '--dry-run-list'], {
+function dryRunList(profile = 'all'): string[] {
+  const out = execFileSync('bash', [SHARD_SH, `--profile=${profile}`, '--dry-run-list'], {
     cwd: REPO_ROOT,
     encoding: 'utf-8',
     env: { ...process.env, SHARD: '' },
@@ -37,6 +37,19 @@ function batchedDryRunList(): string[] {
       cwd: REPO_ROOT,
       encoding: 'utf-8',
       env: { ...process.env, SHARD: '' },
+    },
+  );
+  return out.split('\n').map(s => s.trim()).filter(Boolean);
+}
+
+function shardedDryRunList(profile: 'heavy' | 'light', shard: number, total: number): string[] {
+  const out = execFileSync(
+    'bash',
+    [SHARD_SH, `--profile=${profile}`, '--dry-run-list'],
+    {
+      cwd: REPO_ROOT,
+      encoding: 'utf-8',
+      env: { ...process.env, SHARD: `${shard}/${total}` },
     },
   );
   return out.split('\n').map(s => s.trim()).filter(Boolean);
@@ -69,5 +82,38 @@ describe('run-unit-shard.sh exclusion symmetry', () => {
 
   it('batch and concurrency controls do not change dry-run selection', () => {
     expect(batchedDryRunList()).toEqual(dryRunList());
+  });
+
+  it('heavy and light profiles are disjoint and cover the full unit set', () => {
+    const all = dryRunList();
+    const heavy = dryRunList('heavy');
+    const light = dryRunList('light');
+    const heavySet = new Set(heavy);
+    expect(heavy.length).toBeGreaterThan(0);
+    expect(light.length).toBeGreaterThan(0);
+    expect(light.filter(file => heavySet.has(file))).toEqual([]);
+    expect([...heavy, ...light].sort()).toEqual(all);
+  });
+
+  it('weighted shards are disjoint and exactly cover each profile', () => {
+    const total = 8;
+    for (const profile of ['heavy', 'light'] as const) {
+      const all = dryRunList(profile);
+      const sharded = Array.from(
+        { length: total },
+        (_, index) => shardedDryRunList(profile, index + 1, total),
+      ).flat();
+      expect(new Set(sharded).size).toBe(sharded.length);
+      expect(sharded.sort()).toEqual(all);
+    }
+  });
+
+  it('rejects an unknown profile', () => {
+    expect(() => execFileSync('bash', [SHARD_SH, '--profile=unknown', '--dry-run-list'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf-8',
+      env: { ...process.env, SHARD: '' },
+      stdio: 'pipe',
+    })).toThrow();
   });
 });

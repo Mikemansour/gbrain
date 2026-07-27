@@ -20,6 +20,16 @@ import {
   PGVECTOR_COLUMN_MAX_DIMS,
 } from '../src/core/embedding-dim-check.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import { withEnv } from './helpers/with-env.ts';
+
+// The fresh-brain assertion below requires content_chunks not to exist before
+// initSchema, and this file also changes the gateway dimension before schema
+// creation. Both contracts intentionally bypass the initialized CI fixture.
+const SNAPSHOT_DISABLED = {
+  GBRAIN_PGLITE_SNAPSHOT: undefined,
+  GBRAIN_PGLITE_SNAPSHOT_DIR: undefined,
+  GBRAIN_PGLITE_SNAPSHOT_CATALOG: undefined,
+};
 
 // Canonical pattern: single engine per file, init once, disconnect once.
 // The two tests below diverge in whether they want a migrated brain or a
@@ -38,14 +48,16 @@ beforeAll(async () => {
   // first, so pin 1536 explicitly here BEFORE initSchema (this is exactly
   // the "call configureGateway() in your own beforeAll" escape hatch the
   // preload documents). Reset in afterAll so we don't leak 1536 onward.
-  configureGateway({
-    embedding_model: 'openai:text-embedding-3-large',
-    embedding_dimensions: 1536,
-    env: { ...process.env },
+  await withEnv(SNAPSHOT_DISABLED, async () => {
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_dimensions: 1536,
+      env: { ...process.env },
+    });
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
   });
-  engine = new PGLiteEngine();
-  await engine.connect({});
-  await engine.initSchema();
 });
 
 afterAll(async () => {
@@ -73,15 +85,17 @@ describe('readContentChunksEmbeddingDim', () => {
   test('returns { exists: false, dims: null } on a fresh brain (no initSchema)', async () => {
     // One-off engine for the fresh-brain case. Never call initSchema so
     // content_chunks doesn't exist yet. Cleaned up at end of test.
-    const fresh = new PGLiteEngine();
-    await fresh.connect({});
-    try {
-      const result = await readContentChunksEmbeddingDim(fresh);
-      expect(result.exists).toBe(false);
-      expect(result.dims).toBeNull();
-    } finally {
-      await fresh.disconnect();
-    }
+    await withEnv(SNAPSHOT_DISABLED, async () => {
+      const fresh = new PGLiteEngine();
+      await fresh.connect({});
+      try {
+        const result = await readContentChunksEmbeddingDim(fresh);
+        expect(result.exists).toBe(false);
+        expect(result.dims).toBeNull();
+      } finally {
+        await fresh.disconnect();
+      }
+    });
   }, 30000);
 });
 

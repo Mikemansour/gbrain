@@ -5,6 +5,20 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import { withEnv } from './helpers/with-env.ts';
+
+// This file explicitly probes the pre-initSchema state. The CI snapshot is an
+// initialized fixture by design, so it must not participate in these lifecycle
+// assertions.
+const SNAPSHOT_DISABLED = {
+  GBRAIN_PGLITE_SNAPSHOT: undefined,
+  GBRAIN_PGLITE_SNAPSHOT_DIR: undefined,
+  GBRAIN_PGLITE_SNAPSHOT_CATALOG: undefined,
+};
+
+async function connectWithoutSnapshot(engine: PGLiteEngine): Promise<void> {
+  await withEnv(SNAPSHOT_DISABLED, () => engine.connect({}));
+}
 
 describe('migrate', () => {
   test('LATEST_VERSION is a number >= 1', () => {
@@ -27,18 +41,18 @@ describe('migrate', () => {
 describe('hasPendingMigrations', () => {
   test('returns false on a fully-migrated brain (version === LATEST)', async () => {
     const engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     try {
       await engine.initSchema(); // applies all migrations through LATEST_VERSION
       expect(await hasPendingMigrations(engine)).toBe(false);
     } finally {
       await engine.disconnect();
     }
-  }, 30000);
+  }, 60000);
 
   test('returns true when version config is behind LATEST_VERSION', async () => {
     const engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     try {
       await engine.initSchema();
       // Simulate an older brain by rewinding the version row.
@@ -47,11 +61,11 @@ describe('hasPendingMigrations', () => {
     } finally {
       await engine.disconnect();
     }
-  }, 30000);
+  }, 60000);
 
   test('returns true when version config is missing entirely (defensive default)', async () => {
     const engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     try {
       // Don't call initSchema. Probe against an empty PGlite — getConfig should
       // either return null (treated as version=1) or throw on missing config
@@ -60,7 +74,7 @@ describe('hasPendingMigrations', () => {
     } finally {
       await engine.disconnect();
     }
-  }, 30000);
+  }, 60000);
 });
 
 // ─────────────────────────────────────────────────────────────────
@@ -678,7 +692,7 @@ describe('migrate — runner behavioral (v14 handler + v15 backfill)', () => {
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     await engine.initSchema();
   });
 
@@ -768,7 +782,7 @@ describe('migrate runner v66 — partial index materialized on PGLite', () => {
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     await engine.initSchema();
   });
 
@@ -827,7 +841,7 @@ describe('migrate runner v67 — typed-claim columns materialized on PGLite', ()
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     await engine.initSchema();
   });
 
@@ -891,7 +905,7 @@ describe('migrate: v8 (links_dedup) regression — must be fast on 1K duplicate 
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     await engine.initSchema();
   });
 
@@ -968,7 +982,7 @@ describe('migrate: v9 (timeline_dedup_index) regression — must be fast on 1K d
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     await engine.initSchema();
   });
 
@@ -1676,7 +1690,7 @@ describe('migrate v80 — CHECK widening end-to-end on PGLite', () => {
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     await engine.initSchema();
   });
 
@@ -1869,7 +1883,7 @@ describe('migrate v81 — round-trip on PGLite', () => {
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     await engine.initSchema();
   });
 
@@ -2068,7 +2082,7 @@ describe('migrate v89 — round-trip on PGLite', () => {
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     await engine.initSchema();
   });
 
@@ -2144,7 +2158,7 @@ describe('v112 — pages_links_extracted_at', () => {
   let engine: PGLiteEngine;
   beforeAll(async () => {
     engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     await engine.initSchema();
   }, 60_000);
   afterAll(async () => { if (engine) await engine.disconnect(); }, 60_000);
@@ -2185,7 +2199,7 @@ describe('v117 — context_volunteer_events_table', () => {
   let engine: PGLiteEngine;
   beforeAll(async () => {
     engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     await engine.initSchema();
   }, 60_000);
   afterAll(async () => { if (engine) await engine.disconnect(); }, 60_000);

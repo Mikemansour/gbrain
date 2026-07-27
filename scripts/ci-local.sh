@@ -11,10 +11,10 @@
 #   bash scripts/ci-local.sh --clean      # nuke named volumes for cold debug
 #   bash scripts/ci-local.sh --no-shard   # debug: run E2E sequentially against postgres-1 only
 #
-# 4-way E2E sharding: 4 pgvector services on host ports 5434-5437. The 36 E2E
-# files split N/4 per shard; shards run in parallel. Within a shard, files run
-# sequentially (TRUNCATE CASCADE no-race property documented in run-e2e.sh).
-# Wall-time on a 16-core host: ~6 min sequential -> ~1.5-2 min sharded.
+# Adaptive E2E sharding: up to 12 pgvector services on host ports 5434-5445.
+# E2E files split into weighted shards and run in parallel. Within a shard,
+# files remain sequential (the TRUNCATE CASCADE no-race property is documented
+# in run-e2e.sh). Heavy and light unit profiles share the same worker queue.
 #
 # Stronger than PR CI: PR CI runs only Tier 1's 2 files; this runs all 36.
 
@@ -28,9 +28,15 @@ DIFF=0
 NO_PULL=0
 CLEAN=0
 NO_SHARD=0
-SHARD_COUNT="${GBRAIN_CI_SHARDS:-4}"
+SHARD_COUNT="${GBRAIN_CI_SHARDS:-}"
+HEAVY_UNIT_SHARD_COUNT="${GBRAIN_CI_HEAVY_UNIT_SHARDS:-}"
+LIGHT_UNIT_SHARD_COUNT="${GBRAIN_CI_LIGHT_UNIT_SHARDS:-}"
+INITIAL_HEAVY_UNIT_SHARDS="${GBRAIN_CI_INITIAL_HEAVY_UNIT_SHARDS:-}"
 UNIT_MAX_CONCURRENCY="${GBRAIN_CI_UNIT_CONCURRENCY:-}"
-UNIT_BATCH_SIZE="${GBRAIN_CI_UNIT_BATCH_SIZE:-}"
+HEAVY_UNIT_MAX_CONCURRENCY="${GBRAIN_CI_HEAVY_UNIT_CONCURRENCY:-$UNIT_MAX_CONCURRENCY}"
+LIGHT_UNIT_MAX_CONCURRENCY="${GBRAIN_CI_LIGHT_UNIT_CONCURRENCY:-$UNIT_MAX_CONCURRENCY}"
+HEAVY_UNIT_BATCH_SIZE="${GBRAIN_CI_HEAVY_UNIT_BATCH_SIZE:-}"
+LIGHT_UNIT_BATCH_SIZE="${GBRAIN_CI_LIGHT_UNIT_BATCH_SIZE:-}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -45,37 +51,94 @@ for arg in "$@"; do
   esac
 done
 
-if ! [[ "$SHARD_COUNT" =~ ^[1-4]$ ]]; then
-  echo "[ci-local] ERROR: GBRAIN_CI_SHARDS must be an integer from 1 through 4." >&2
+HOST_MEMORY_KB=0
+HOST_SWAP_KB=0
+if [ -r /proc/meminfo ]; then
+  HOST_MEMORY_KB=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+  HOST_SWAP_KB=$(awk '/^SwapTotal:/ { print $2 }' /proc/meminfo)
+fi
+
+# Hosts with at least 14 GiB use shorter shards and a wider queue to avoid
+# long-tail skew. The 14–24 GiB tier starts two heavy workers beside 12 E2E
+# workers; larger or swap-backed hosts start four. Smaller hosts retain the
+# conservative shape.
+if [ "${HOST_MEMORY_KB:-0}" -ge 25165824 ] || [ "${HOST_SWAP_KB:-0}" -ge 8388608 ]; then
+  SHARD_COUNT="${SHARD_COUNT:-12}"
+  HEAVY_UNIT_SHARD_COUNT="${HEAVY_UNIT_SHARD_COUNT:-128}"
+  LIGHT_UNIT_SHARD_COUNT="${LIGHT_UNIT_SHARD_COUNT:-64}"
+  INITIAL_HEAVY_UNIT_SHARDS="${INITIAL_HEAVY_UNIT_SHARDS:-4}"
+elif [ "${HOST_MEMORY_KB:-0}" -ge 14680064 ]; then
+  SHARD_COUNT="${SHARD_COUNT:-12}"
+  HEAVY_UNIT_SHARD_COUNT="${HEAVY_UNIT_SHARD_COUNT:-128}"
+  LIGHT_UNIT_SHARD_COUNT="${LIGHT_UNIT_SHARD_COUNT:-64}"
+  INITIAL_HEAVY_UNIT_SHARDS="${INITIAL_HEAVY_UNIT_SHARDS:-2}"
+else
+  SHARD_COUNT="${SHARD_COUNT:-8}"
+  HEAVY_UNIT_SHARD_COUNT="${HEAVY_UNIT_SHARD_COUNT:-12}"
+  LIGHT_UNIT_SHARD_COUNT="${LIGHT_UNIT_SHARD_COUNT:-4}"
+  INITIAL_HEAVY_UNIT_SHARDS="${INITIAL_HEAVY_UNIT_SHARDS:-4}"
+fi
+
+if ! [[ "$SHARD_COUNT" =~ ^([1-9]|1[0-2])$ ]]; then
+  echo "[ci-local] ERROR: GBRAIN_CI_SHARDS must be an integer from 1 through 12." >&2
   exit 1
 fi
-if [ -z "${GBRAIN_CI_SHARDS:-}" ] && [ "$NO_SHARD" = "0" ] && [ -r /proc/meminfo ]; then
-  HOST_MEMORY_KB=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+for unit_count in "$HEAVY_UNIT_SHARD_COUNT" "$LIGHT_UNIT_SHARD_COUNT"; do
+  if ! [[ "$unit_count" =~ ^[0-9]+$ ]] || [ "$unit_count" -lt 1 ] || [ "$unit_count" -gt 512 ]; then
+    echo "[ci-local] ERROR: unit shard counts must be integers from 1 through 512." >&2
+    exit 1
+  fi
+done
+if ! [[ "$INITIAL_HEAVY_UNIT_SHARDS" =~ ^[0-9]+$ ]] || \
+   [ "$INITIAL_HEAVY_UNIT_SHARDS" -gt "$HEAVY_UNIT_SHARD_COUNT" ]; then
+  echo "[ci-local] ERROR: initial heavy unit shards must be 0..heavy shard count." >&2
+  exit 1
+fi
+if [ "$NO_SHARD" = "0" ] && [ -r /proc/meminfo ]; then
   if [ "${HOST_MEMORY_KB:-0}" -lt 25165824 ]; then
-    UNIT_MAX_CONCURRENCY="${UNIT_MAX_CONCURRENCY:-2}"
-    UNIT_BATCH_SIZE="${UNIT_BATCH_SIZE:-8}"
+    HEAVY_UNIT_MAX_CONCURRENCY="${HEAVY_UNIT_MAX_CONCURRENCY:-1}"
+    LIGHT_UNIT_MAX_CONCURRENCY="${LIGHT_UNIT_MAX_CONCURRENCY:-4}"
+    HEAVY_UNIT_BATCH_SIZE="${HEAVY_UNIT_BATCH_SIZE:-1}"
+    LIGHT_UNIT_BATCH_SIZE="${LIGHT_UNIT_BATCH_SIZE:-12}"
     echo "[ci-local] Host memory is below 24 GiB; bounding each shard to avoid OOM (override with GBRAIN_CI_SHARDS/GBRAIN_CI_UNIT_*)."
   fi
 fi
 if [ "$NO_SHARD" = "1" ]; then
   SHARD_COUNT=1
+  HEAVY_UNIT_SHARD_COUNT=1
+  LIGHT_UNIT_SHARD_COUNT=1
+  INITIAL_HEAVY_UNIT_SHARDS=1
 fi
-if [ -n "$UNIT_MAX_CONCURRENCY" ] && ! [[ "$UNIT_MAX_CONCURRENCY" =~ ^[1-9][0-9]*$ ]]; then
-  echo "[ci-local] ERROR: GBRAIN_CI_UNIT_CONCURRENCY must be a positive integer." >&2
-  exit 1
+INITIAL_WORKER_COUNT=$((INITIAL_HEAVY_UNIT_SHARDS + SHARD_COUNT))
+for concurrency in "$HEAVY_UNIT_MAX_CONCURRENCY" "$LIGHT_UNIT_MAX_CONCURRENCY"; do
+  if [ -n "$concurrency" ] && ! [[ "$concurrency" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ci-local] ERROR: unit concurrency values must be positive integers." >&2
+    exit 1
+  fi
+done
+for batch_size in "$HEAVY_UNIT_BATCH_SIZE" "$LIGHT_UNIT_BATCH_SIZE"; do
+  if [ -n "$batch_size" ] && ! [[ "$batch_size" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ci-local] ERROR: unit batch sizes must be positive integers." >&2
+    exit 1
+  fi
+done
+HEAVY_UNIT_ARGS="--profile=heavy"
+LIGHT_UNIT_ARGS="--profile=light"
+if [ -n "$HEAVY_UNIT_MAX_CONCURRENCY" ]; then
+  HEAVY_UNIT_ARGS="--max-concurrency=$HEAVY_UNIT_MAX_CONCURRENCY $HEAVY_UNIT_ARGS"
+  echo "[ci-local] Heavy unit concurrency capped at $HEAVY_UNIT_MAX_CONCURRENCY per shard."
 fi
-if [ -n "$UNIT_BATCH_SIZE" ] && ! [[ "$UNIT_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
-  echo "[ci-local] ERROR: GBRAIN_CI_UNIT_BATCH_SIZE must be a positive integer." >&2
-  exit 1
+if [ -n "$LIGHT_UNIT_MAX_CONCURRENCY" ]; then
+  LIGHT_UNIT_ARGS="--max-concurrency=$LIGHT_UNIT_MAX_CONCURRENCY $LIGHT_UNIT_ARGS"
+  echo "[ci-local] Light unit concurrency capped at $LIGHT_UNIT_MAX_CONCURRENCY per shard."
 fi
-UNIT_SHARD_ARGS=""
-if [ -n "$UNIT_MAX_CONCURRENCY" ]; then
-  UNIT_SHARD_ARGS="--max-concurrency=$UNIT_MAX_CONCURRENCY"
-  echo "[ci-local] Unit-test concurrency capped at $UNIT_MAX_CONCURRENCY per shard."
+if [ -n "$HEAVY_UNIT_BATCH_SIZE" ]; then
+  HEAVY_UNIT_ARGS="$HEAVY_UNIT_ARGS --batch-size=$HEAVY_UNIT_BATCH_SIZE"
+  echo "[ci-local] Heavy unit batches capped at $HEAVY_UNIT_BATCH_SIZE files."
 fi
-if [ -n "$UNIT_BATCH_SIZE" ]; then
-  UNIT_SHARD_ARGS="$UNIT_SHARD_ARGS --batch-size=$UNIT_BATCH_SIZE"
-  echo "[ci-local] Unit-test process batches capped at $UNIT_BATCH_SIZE files."
+if [ -n "$LIGHT_UNIT_BATCH_SIZE" ]; then
+  LIGHT_UNIT_ARGS="$LIGHT_UNIT_ARGS --batch-size=$LIGHT_UNIT_BATCH_SIZE"
+  echo "[ci-local] Light unit batches capped at $LIGHT_UNIT_BATCH_SIZE files."
 fi
 
 cleanup() {
@@ -140,9 +203,11 @@ for shard in $(seq 1 "$SHARD_COUNT"); do
   fi
 done
 export GBRAIN_CI_PG_PORT="$PG_PORT_BASE"
-export GBRAIN_CI_PG_PORT_2=$((PG_PORT_BASE + 1))
-export GBRAIN_CI_PG_PORT_3=$((PG_PORT_BASE + 2))
-export GBRAIN_CI_PG_PORT_4=$((PG_PORT_BASE + 3))
+for shard in $(seq 2 "$SHARD_COUNT"); do
+  port_var="GBRAIN_CI_PG_PORT_$shard"
+  printf -v "$port_var" '%s' "$((PG_PORT_BASE + shard - 1))"
+  export "$port_var"
+done
 
 # Step 0: gitleaks on the host (no docker, no postgres, no bun needed).
 # Mirrors test.yml's separate gitleaks job. Fail loudly if not installed.
@@ -218,9 +283,33 @@ if [ "$SHARD_TOTAL" != "$EXPECTED_ALL" ]; then
 fi
 echo "[ci-local] Smoke OK ($SMOKE_NO_ARGS files no-arg, 1 single-arg, ${SHARD_TOTAL}=${SHARD_COUNT}-shard total)."
 
+# Unit profile smoke: heavy and light must remain an exact, disjoint partition
+# of the full fast unit set. This makes the memory-aware split fail closed.
+UNIT_SMOKE_DIR=$(mktemp -d /tmp/gbrain-unit-profile-smoke.XXXXXX)
+bash scripts/run-unit-shard.sh --profile=all --dry-run-list > "$UNIT_SMOKE_DIR/all"
+bash scripts/run-unit-shard.sh --profile=heavy --dry-run-list > "$UNIT_SMOKE_DIR/heavy"
+bash scripts/run-unit-shard.sh --profile=light --dry-run-list > "$UNIT_SMOKE_DIR/light"
+sort "$UNIT_SMOKE_DIR/heavy" "$UNIT_SMOKE_DIR/light" > "$UNIT_SMOKE_DIR/combined"
+if ! cmp -s "$UNIT_SMOKE_DIR/all" "$UNIT_SMOKE_DIR/combined"; then
+  echo "[ci-local] ERROR: heavy/light unit profiles do not exactly cover the full unit set." >&2
+  rm -rf "$UNIT_SMOKE_DIR"
+  exit 1
+fi
+if [ -n "$(comm -12 "$UNIT_SMOKE_DIR/heavy" "$UNIT_SMOKE_DIR/light")" ]; then
+  echo "[ci-local] ERROR: heavy/light unit profiles overlap." >&2
+  rm -rf "$UNIT_SMOKE_DIR"
+  exit 1
+fi
+UNIT_ALL_COUNT=$(wc -l < "$UNIT_SMOKE_DIR/all" | tr -d ' ')
+UNIT_HEAVY_COUNT=$(wc -l < "$UNIT_SMOKE_DIR/heavy" | tr -d ' ')
+UNIT_LIGHT_COUNT=$(wc -l < "$UNIT_SMOKE_DIR/light" | tr -d ' ')
+rm -rf "$UNIT_SMOKE_DIR"
+echo "[ci-local] Unit profile smoke OK (${UNIT_HEAVY_COUNT} heavy + ${UNIT_LIGHT_COUNT} light = ${UNIT_ALL_COUNT})."
+
 # Step 4: build the runner-side command.
-# Tier 1: 4-shard parallel UNIT + E2E. Each shard runs ~46 unit files + ~9
-# E2E files against postgres-N. Guards + typecheck run ONCE before fan-out.
+# Tier 1: independent unit and E2E shard pools run concurrently. E2E remains
+# sequential within each database shard; unit batches are memory-bounded.
+# Guards + typecheck run ONCE before fan-out.
 # --no-shard runs the legacy unsharded flow (debug aid).
 if [ "$NO_SHARD" = "1" ]; then
   if [ "$DIFF" = "1" ]; then
@@ -258,8 +347,8 @@ GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrai
 bash scripts/run-e2e.sh'
   fi
 else
-  # Tier 1 sharded path. Each shard runs unit+E2E sequentially against its
-  # own postgres-N. Shards run in parallel via xargs.
+  # Tier 1 sharded path. Unit shards need no database; E2E shards each own
+  # postgres-N and preserve sequential execution inside run-e2e.sh.
   if [ "$DIFF" = "1" ]; then
     DIFF_E2E_PREP='SELECTED=$(bun run scripts/select-e2e.ts)
 if [ -z "$SELECTED" ]; then
@@ -280,79 +369,191 @@ bun run typecheck
 echo \"[runner] Tier 3: building a snapshot for the current schema inputs\"
 bun run build:pglite-snapshot
 export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
+export GBRAIN_PGLITE_SNAPSHOT_DIR=test/fixtures/pglite-snapshot-dir
+export GBRAIN_PGLITE_SNAPSHOT_CATALOG=test/fixtures/pglite-snapshot-catalog
 # schema-drift.test.ts may reset only a test-shaped database. Its second
 # safety gate requires this explicit opt-in when Docker service names replace
 # localhost; run-e2e.sh preserves this one harness-owned GBRAIN_* variable.
 export GBRAIN_TEST_DB=1
+export GBRAIN_TEST_QUIET_MIGRATIONS=1
 echo \"[runner] resolving E2E file selection (--diff aware)\"
 ${DIFF_E2E_PREP}
-mkdir -p /tmp/shard-logs
-echo \"[runner] Tier 1: ${SHARD_COUNT}-shard parallel unit + E2E (xargs -P${SHARD_COUNT})\"
+mkdir -p /tmp/heavy-unit-shard-logs /tmp/light-unit-shard-logs /tmp/e2e-shard-logs
+echo \"[runner] Tier 1: adaptive ${INITIAL_WORKER_COUNT}-worker schedule across ${HEAVY_UNIT_SHARD_COUNT} heavy-unit, ${LIGHT_UNIT_SHARD_COUNT} light-unit, and ${SHARD_COUNT} E2E shards\"
 set +e
-seq 1 ${SHARD_COUNT} | xargs -P${SHARD_COUNT} -I{} sh -c '
-  shard=\$1
-  shard_home=\$(mktemp -d /tmp/gbrain-ci-shard-\${shard}.XXXXXX)
-  trap \"rm -rf \$shard_home\" EXIT
-  export HOME=\$shard_home
-  # Unit tests deliberately override HOME to exercise path resolution.
-  # Leaving GBRAIN_HOME unset preserves that contract while still preventing
-  # parallel shards from sharing /root. run-e2e.sh sets both per file later.
+run_heavy_unit_shard() (
+  unit_shard=\$1
+  unit_home=\$(mktemp -d /tmp/gbrain-ci-heavy-unit-\${unit_shard}.XXXXXX)
+  trap 'rm -rf \"\$unit_home\"' EXIT
+  export HOME=\$unit_home
   unset GBRAIN_HOME
-  mkdir -p \$shard_home/.gbrain
-  log=/tmp/shard-logs/shard-\${shard}.log
-  echo \"[shard \${shard}] start\" > \$log
-  echo \"[shard \${shard}] unit phase (SHARD=\${shard}/${SHARD_COUNT}, DATABASE_URL unset)\" >> \$log
-  env -u DATABASE_URL SHARD=\${shard}/${SHARD_COUNT} bash scripts/run-unit-shard.sh ${UNIT_SHARD_ARGS} >> \$log 2>&1
+  mkdir -p \$unit_home/.gbrain
+  log=/tmp/heavy-unit-shard-logs/unit-\${unit_shard}.log
+  echo \"[heavy unit \${unit_shard}] start (SHARD=\${unit_shard}/${HEAVY_UNIT_SHARD_COUNT})\" > \$log
+  env -u DATABASE_URL SHARD=\${unit_shard}/${HEAVY_UNIT_SHARD_COUNT} bash scripts/run-unit-shard.sh ${HEAVY_UNIT_ARGS} >> \$log 2>&1
   unit_exit=\$?
   if [ \$unit_exit -ne 0 ]; then
-    echo \"[shard \${shard}] UNIT FAILED (exit=\$unit_exit)\" >> \$log
+    echo \"[heavy unit \${unit_shard}] FAILED (exit=\$unit_exit)\" >> \$log
     exit \$unit_exit
   fi
-  echo \"[shard \${shard}] e2e phase (SHARD=\${shard}/${SHARD_COUNT}, DATABASE_URL=postgres-\${shard})\" >> \$log
+  echo \"[heavy unit \${unit_shard}] DONE\" >> \$log
+)
+
+run_light_unit_shard() (
+  unit_shard=\$1
+  unit_home=\$(mktemp -d /tmp/gbrain-ci-light-unit-\${unit_shard}.XXXXXX)
+  trap 'rm -rf \"\$unit_home\"' EXIT
+  export HOME=\$unit_home
+  unset GBRAIN_HOME
+  mkdir -p \$unit_home/.gbrain
+  log=/tmp/light-unit-shard-logs/unit-\${unit_shard}.log
+  echo \"[light unit \${unit_shard}] start (SHARD=\${unit_shard}/${LIGHT_UNIT_SHARD_COUNT})\" > \$log
+  env -u DATABASE_URL SHARD=\${unit_shard}/${LIGHT_UNIT_SHARD_COUNT} bash scripts/run-unit-shard.sh ${LIGHT_UNIT_ARGS} >> \$log 2>&1
+  unit_exit=\$?
+  if [ \$unit_exit -ne 0 ]; then
+    echo \"[light unit \${unit_shard}] FAILED (exit=\$unit_exit)\" >> \$log
+    exit \$unit_exit
+  fi
+  echo \"[light unit \${unit_shard}] DONE\" >> \$log
+)
+
+run_e2e_shard() (
+  e2e_shard=\$1
+  e2e_home=\$(mktemp -d /tmp/gbrain-ci-e2e-\${e2e_shard}.XXXXXX)
+  trap 'rm -rf \"\$e2e_home\"' EXIT
+  export HOME=\$e2e_home
+  unset GBRAIN_HOME
+  mkdir -p \$e2e_home/.gbrain
+  log=/tmp/e2e-shard-logs/e2e-\${e2e_shard}.log
+  echo \"[e2e \${e2e_shard}] start (SHARD=\${e2e_shard}/${SHARD_COUNT}, DATABASE_URL=postgres-\${e2e_shard})\" > \$log
   if [ -s /tmp/e2e-selected.txt ]; then
-    SHARD=\${shard}/${SHARD_COUNT} \\
-    DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
+    SHARD=\${e2e_shard}/${SHARD_COUNT} \\
+    DATABASE_URL=postgresql://postgres:postgres@postgres-\${e2e_shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
     xargs -a /tmp/e2e-selected.txt bash scripts/run-e2e.sh >> \$log 2>&1
   else
-    SHARD=\${shard}/${SHARD_COUNT} \\
-    DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
+    SHARD=\${e2e_shard}/${SHARD_COUNT} \\
+    DATABASE_URL=postgresql://postgres:postgres@postgres-\${e2e_shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
     bash scripts/run-e2e.sh >> \$log 2>&1
   fi
   e2e_exit=\$?
   if [ \$e2e_exit -ne 0 ]; then
-    echo \"[shard \${shard}] E2E FAILED (exit=\$e2e_exit)\" >> \$log
+    echo \"[e2e \${e2e_shard}] FAILED (exit=\$e2e_exit)\" >> \$log
     exit \$e2e_exit
   fi
-  echo \"[shard \${shard}] DONE\" >> \$log
-' _ {}
-shard_xargs_exit=\$?
+  echo \"[e2e \${e2e_shard}] DONE\" >> \$log
+)
+
+active_pids=()
+declare -A pid_kinds
+initial_heavy=${INITIAL_HEAVY_UNIT_SHARDS}
+if [ ${HEAVY_UNIT_SHARD_COUNT} -lt \$initial_heavy ]; then initial_heavy=${HEAVY_UNIT_SHARD_COUNT}; fi
+if [ \$initial_heavy -gt 0 ]; then
+  for s in \$(seq 1 \$initial_heavy); do
+    run_heavy_unit_shard \$s &
+    child_pid=\$!
+    active_pids+=(\$child_pid)
+    pid_kinds[\$child_pid]=unit
+  done
+fi
+for s in \$(seq 1 ${SHARD_COUNT}); do
+  run_e2e_shard \$s &
+  child_pid=\$!
+  active_pids+=(\$child_pid)
+  pid_kinds[\$child_pid]=e2e
+done
+
+deferred_profiles=()
+deferred_shards=()
+if [ \$initial_heavy -lt ${HEAVY_UNIT_SHARD_COUNT} ]; then
+  for s in \$(seq \$((initial_heavy + 1)) ${HEAVY_UNIT_SHARD_COUNT}); do
+    deferred_profiles+=(heavy)
+    deferred_shards+=(\$s)
+  done
+fi
+for s in \$(seq 1 ${LIGHT_UNIT_SHARD_COUNT}); do
+  deferred_profiles+=(light)
+  deferred_shards+=(\$s)
+done
+
+e2e_exit=0
+unit_exit=0
+deferred_index=0
+while [ \${#active_pids[@]} -gt 0 ]; do
+  completed_pid=
+  wait -n -p completed_pid \"\${active_pids[@]}\"
+  completed_exit=\$?
+  completed_kind=\${pid_kinds[\$completed_pid]}
+  if [ \$completed_exit -ne 0 ]; then
+    if [ \"\$completed_kind\" = e2e ]; then e2e_exit=1; else unit_exit=1; fi
+  fi
+  next_remaining=()
+  for candidate_pid in \"\${active_pids[@]}\"; do
+    if [ \"\$candidate_pid\" != \"\$completed_pid\" ]; then next_remaining+=(\"\$candidate_pid\"); fi
+  done
+  active_pids=(\"\${next_remaining[@]}\")
+  unset 'pid_kinds[\$completed_pid]'
+  if [ \$deferred_index -lt \${#deferred_profiles[@]} ]; then
+    next_profile=\${deferred_profiles[\$deferred_index]}
+    next_shard=\${deferred_shards[\$deferred_index]}
+    echo \"[runner] \$completed_kind slot freed; starting \$next_profile-unit shard \$next_shard\"
+    if [ \"\$next_profile\" = heavy ]; then
+      run_heavy_unit_shard \$next_shard &
+    else
+      run_light_unit_shard \$next_shard &
+    fi
+    child_pid=\$!
+    active_pids+=(\$child_pid)
+    pid_kinds[\$child_pid]=unit
+    deferred_index=\$((deferred_index + 1))
+  fi
+done
 set -e
 echo \"\"
-echo \"=== SHARD LOGS (last 30 lines each + unit/e2e summaries) ===\"
-for s in \$(seq 1 ${SHARD_COUNT}); do
+echo \"=== HEAVY UNIT SHARD LOGS (last 12 lines each) ===\"
+for s in \$(seq 1 ${HEAVY_UNIT_SHARD_COUNT}); do
   echo \"\"
-  echo \"--- shard \$s ---\"
-  if [ -f /tmp/shard-logs/shard-\$s.log ]; then
-    # Pull the unit + E2E summary lines explicitly so they survive even if
-    # the file is huge. Match: bun's '<N> pass / <N> fail' pairs, run-e2e.sh's
-    # 'Files: ... / Tests: ...' summary, and our own shard markers.
-    grep -E '^\\[shard|^Files: |^Tests: |Ran [0-9]+ tests|^[[:space:]]+[0-9]+ (pass|fail|skip)\$' /tmp/shard-logs/shard-\$s.log || true
-    echo \"  (last 30 lines for context)\"
-    tail -30 /tmp/shard-logs/shard-\$s.log
+  echo \"--- heavy unit \$s ---\"
+  if [ -f /tmp/heavy-unit-shard-logs/unit-\$s.log ]; then
+    grep -E '^\\[heavy unit ' /tmp/heavy-unit-shard-logs/unit-\$s.log || true
+    tail -12 /tmp/heavy-unit-shard-logs/unit-\$s.log
   else
-    echo \"(no log file written — shard never started)\"
+    echo \"(no heavy unit log file written)\"
   fi
 done
 echo \"\"
-if [ \$shard_xargs_exit -ne 0 ]; then
-  echo \"[runner] One or more shards failed (xargs exit=\$shard_xargs_exit). See SHARD LOGS above.\"
-  exit \$shard_xargs_exit
+echo \"=== LIGHT UNIT SHARD LOGS (last 12 lines each) ===\"
+for s in \$(seq 1 ${LIGHT_UNIT_SHARD_COUNT}); do
+  echo \"\"
+  echo \"--- light unit \$s ---\"
+  if [ -f /tmp/light-unit-shard-logs/unit-\$s.log ]; then
+    grep -E '^\\[light unit ' /tmp/light-unit-shard-logs/unit-\$s.log || true
+    tail -12 /tmp/light-unit-shard-logs/unit-\$s.log
+  else
+    echo \"(no light unit log file written)\"
+  fi
+done
+echo \"\"
+echo \"=== E2E SHARD LOGS (summaries + last 20 lines each) ===\"
+for s in \$(seq 1 ${SHARD_COUNT}); do
+  echo \"\"
+  echo \"--- e2e \$s ---\"
+  if [ -f /tmp/e2e-shard-logs/e2e-\$s.log ]; then
+    grep -E '^\\[e2e |^Files: |^Tests: ' /tmp/e2e-shard-logs/e2e-\$s.log || true
+    tail -20 /tmp/e2e-shard-logs/e2e-\$s.log
+  else
+    echo \"(no E2E log file written)\"
+  fi
+done
+echo \"\"
+if [ \$unit_exit -ne 0 ] || [ \$e2e_exit -ne 0 ]; then
+  echo \"[runner] One or more parallel phases failed (unit=\$unit_exit e2e=\$e2e_exit).\"
+  exit 1
 fi
-echo \"[runner] All ${SHARD_COUNT} shards passed.\""
+echo \"[runner] All ${HEAVY_UNIT_SHARD_COUNT} heavy-unit, ${LIGHT_UNIT_SHARD_COUNT} light-unit, and ${SHARD_COUNT} E2E shards passed.\""
 fi
 
 INNER_CMD=$(cat <<'EOF'

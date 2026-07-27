@@ -29,6 +29,8 @@ import { join, resolve } from 'path';
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
 const PARALLEL_SH_SRC = resolve(REPO_ROOT, 'scripts/run-unit-parallel.sh');
 const SHARD_SH_SRC = resolve(REPO_ROOT, 'scripts/run-unit-shard.sh');
+const SHARDING_SRC = resolve(REPO_ROOT, 'scripts/sharding.ts');
+const WEIGHTS_SRC = resolve(REPO_ROOT, 'scripts/test-weights.json');
 const SERIAL_SH_SRC = resolve(REPO_ROOT, 'scripts/run-serial-tests.sh');
 
 let TMPROOT: string;
@@ -43,13 +45,15 @@ beforeAll(() => {
 
   copyFileSync(PARALLEL_SH_SRC, join(TMPROOT, 'scripts', 'run-unit-parallel.sh'));
   copyFileSync(SHARD_SH_SRC, join(TMPROOT, 'scripts', 'run-unit-shard.sh'));
+  copyFileSync(SHARDING_SRC, join(TMPROOT, 'scripts', 'sharding.ts'));
+  copyFileSync(WEIGHTS_SRC, join(TMPROOT, 'scripts', 'test-weights.json'));
   copyFileSync(SERIAL_SH_SRC, join(TMPROOT, 'scripts', 'run-serial-tests.sh'));
   chmodSync(join(TMPROOT, 'scripts', 'run-unit-parallel.sh'), 0o755);
   chmodSync(join(TMPROOT, 'scripts', 'run-unit-shard.sh'), 0o755);
   chmodSync(join(TMPROOT, 'scripts', 'run-serial-tests.sh'), 0o755);
 
-  // 3 passing + 1 failing test file. Round-robin sharding will land
-  // them across 2 shards so we exercise the multi-shard merge path.
+  // 3 passing + 1 failing test file. Weighted sharding will land them
+  // across 2 shards so we exercise the multi-shard merge path.
   const passing = `import { describe, it, expect } from 'bun:test';
 describe('passing', () => {
   it('arithmetic works', () => { expect(1 + 1).toBe(2); });

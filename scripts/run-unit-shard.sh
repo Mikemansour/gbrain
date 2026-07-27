@@ -2,15 +2,16 @@
 # scripts/run-unit-shard.sh
 #
 # Runs the unit suite for a single shard. Excludes test/e2e/* (those are run
-# by scripts/run-e2e.sh in the E2E phase). When SHARD=N/M is set, keeps every
-# M-th file starting at index N (1-indexed); otherwise runs the full unit set.
+# by scripts/run-e2e.sh in the E2E phase). When SHARD=N/M is set, assigns files
+# with deterministic weighted longest-processing-time balancing; otherwise
+# runs the full unit set.
 #
-# Used by scripts/ci-local.sh to fan 4 unit-shard workers in parallel inside
-# the runner container, each pinned to its own postgres shard for the
-# downstream E2E phase.
+# Used by scripts/ci-local.sh to schedule memory-classified unit shards in
+# parallel inside the runner container. Unit shards are database-independent;
+# E2E shards own their PostgreSQL services separately.
 #
 # Sequential bun processes within a shard (one bun test invocation with the
-# shard's file list); parallel across shards (4 of these run concurrently).
+# shard's file list); parallel across independently scheduled shards.
 
 set -euo pipefail
 
@@ -21,12 +22,15 @@ cd "$(dirname "$0")/.."
 MAX_CONC=""
 BATCH_SIZE=0
 DRY_RUN=0
+PROFILE="all"
 while [ $# -gt 0 ]; do
   case "$1" in
     --max-concurrency) MAX_CONC="$2"; shift 2 ;;
     --max-concurrency=*) MAX_CONC="${1#*=}"; shift ;;
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
     --batch-size=*) BATCH_SIZE="${1#*=}"; shift ;;
+    --profile) PROFILE="$2"; shift 2 ;;
+    --profile=*) PROFILE="${1#*=}"; shift ;;
     --dry-run-list) DRY_RUN=1; shift ;;
     *) echo "ERROR: unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -35,6 +39,10 @@ if ! printf '%s' "$BATCH_SIZE" | grep -qE '^[0-9]+$' || [ "$BATCH_SIZE" -lt 0 ];
   echo "ERROR: --batch-size must be a non-negative integer" >&2
   exit 2
 fi
+case "$PROFILE" in
+  all|heavy|light) ;;
+  *) echo "ERROR: --profile must be all, heavy, or light" >&2; exit 2 ;;
+esac
 
 # All non-E2E test files, sorted for deterministic shard splits.
 # Tier 4: *.slow.test.ts is "always-slow" (cold-path correctness checks);
@@ -47,6 +55,26 @@ while IFS= read -r f; do
   all_files+=("$f")
 done < <(find test -name '*.test.ts' -not -path 'test/e2e/*' -not -name '*.slow.test.ts' -not -name '*.serial.test.ts' | sort)
 
+# PGLite-backed tests are the memory-heavy subset. The local CI gate runs this
+# subset in a smaller worker pool while allowing pure/light tests to fan out
+# more widely. Classification is content-based and complementary by design:
+# every selected unit file belongs to exactly one of heavy or light.
+if [ "$PROFILE" != "all" ]; then
+  heavy_files=()
+  while IFS= read -r f; do
+    [ -n "$f" ] && heavy_files+=("$f")
+  done < <(grep -Eil 'pglite|@electric-sql' "${all_files[@]}" | sort || true)
+  if [ "$PROFILE" = "heavy" ]; then
+    all_files=("${heavy_files[@]}")
+  else
+    light_files=()
+    while IFS= read -r f; do
+      [ -n "$f" ] && light_files+=("$f")
+    done < <(comm -23 <(printf '%s\n' "${all_files[@]}") <(printf '%s\n' "${heavy_files[@]}"))
+    all_files=("${light_files[@]}")
+  fi
+fi
+
 files=()
 if [ -n "${SHARD:-}" ]; then
   shard_n=${SHARD%/*}
@@ -57,13 +85,13 @@ if [ -n "${SHARD:-}" ]; then
     echo "ERROR: invalid SHARD=$SHARD (expected N/M with 1<=N<=M, both integers)" >&2
     exit 1
   fi
-  i=0
-  for f in "${all_files[@]}"; do
-    if [ $((i % shard_m + 1)) -eq "$shard_n" ]; then
-      files+=("$f")
-    fi
-    i=$((i + 1))
-  done
+  if ! shard_output=$(printf '%s\n' "${all_files[@]}" | bun run scripts/sharding.ts "$shard_n" "$shard_m"); then
+    echo "ERROR: weighted unit sharding failed" >&2
+    exit 1
+  fi
+  while IFS= read -r f; do
+    [ -n "$f" ] && files+=("$f")
+  done <<< "$shard_output"
 else
   files=("${all_files[@]}")
 fi
