@@ -34,6 +34,7 @@ let tokenStatus = 200;
 let mcpResponseFor: (req: { method: string; params?: unknown }) => unknown = () => ({});
 let mcpStatusOverride: number | null = null;
 let tokenMintCount = 0;
+let tokenExpiresIn = 3600;
 
 beforeAll(async () => {
   server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -51,7 +52,7 @@ beforeAll(async () => {
         res.end(JSON.stringify({
           access_token: `token-${Date.now()}-${tokenMintCount}`,
           token_type: 'bearer',
-          expires_in: 3600,
+          expires_in: tokenExpiresIn,
           scope: 'read write admin',
         }));
       } else {
@@ -110,6 +111,7 @@ afterAll(async () => {
 beforeEach(() => {
   tokenStatus = 200;
   tokenMintCount = 0;
+  tokenExpiresIn = 3600;
   mcpStatusOverride = null;
   mcpResponseFor = () => ({ content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
   _clearMcpClientTokenCache();
@@ -142,6 +144,14 @@ describe('callRemoteTool — happy path', () => {
     expect(tokenMintCount).toBe(1); // still 1 — cache was reused
     await callRemoteTool(makeConfig(), 'noop', {});
     expect(tokenMintCount).toBe(1);
+  });
+
+  test('re-mints tokens inside the 30-second clock-skew safety margin', async () => {
+    tokenExpiresIn = 20;
+    await callRemoteTool(makeConfig(), 'first', {});
+    expect(tokenMintCount).toBe(1);
+    await callRemoteTool(makeConfig(), 'second', {});
+    expect(tokenMintCount).toBe(2);
   });
 
   test('passes args through to the tool handler', async () => {
