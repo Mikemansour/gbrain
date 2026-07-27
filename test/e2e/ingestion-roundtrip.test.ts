@@ -123,11 +123,13 @@ describe('ingestion roundtrip — inbox-folder → daemon → ingest_capture →
       engine,
       logger,
       dispatch: async (event) => {
-        dispatchedEvents.push(event);
         // Route the event into the handler directly. In production the
         // daemon would submit a Minion job and the worker would invoke
         // the handler; here we collapse that for test-loop efficiency.
         await handler(makeFakeJobCtx({ event }));
+        // This array is the test's completion signal, so publish only after
+        // the async handler has committed the page.
+        dispatchedEvents.push(event);
         return { kind: 'queued' };
       },
     });
@@ -155,8 +157,10 @@ describe('ingestion roundtrip — inbox-folder → daemon → ingest_capture →
     fs.writeFileSync(captured, '---\ntitle: Roundtrip\n---\n\nfull e2e flow');
 
     await daemon.start();
-    // Wait for the daemon to pick it up + dispatch + handler to write.
-    await waitFor(() => dispatchedEvents.length === 1, 15000);
+    // Wait for the full observable contract: handler commit and the source's
+    // post-emit archive move. ctx.emit is intentionally fire-and-forget, so
+    // observing dispatch alone is not an archive-completion barrier.
+    await waitFor(() => dispatchedEvents.length === 1 && !fs.existsSync(captured), 15000);
 
     // Page is in the DB.
     const page = await engine.getPage(dispatchedEvents[0]!.metadata!.slug as string ??
@@ -187,8 +191,8 @@ describe('ingestion roundtrip — inbox-folder → daemon → ingest_capture →
       engine,
       logger,
       dispatch: async (event) => {
-        dispatchedEvents.push(event);
         await handler(makeFakeJobCtx({ event }));
+        dispatchedEvents.push(event);
         return { kind: 'queued' };
       },
     });
@@ -245,8 +249,8 @@ describe('ingestion roundtrip — multi-source coordination', () => {
       engine,
       logger,
       dispatch: async (event) => {
-        dispatchedEvents.push(event);
         await handler(makeFakeJobCtx({ event }));
+        dispatchedEvents.push(event);
         return { kind: 'queued' };
       },
     });

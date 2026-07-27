@@ -19,15 +19,22 @@ cd "$(dirname "$0")/.."
 # --max-concurrency=N is forwarded to `bun test`. v0.26.4: invoked by
 # run-unit-parallel.sh; safe to call without (defaults to bun's default cap).
 MAX_CONC=""
+BATCH_SIZE=0
 DRY_RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --max-concurrency) MAX_CONC="$2"; shift 2 ;;
     --max-concurrency=*) MAX_CONC="${1#*=}"; shift ;;
+    --batch-size) BATCH_SIZE="$2"; shift 2 ;;
+    --batch-size=*) BATCH_SIZE="${1#*=}"; shift ;;
     --dry-run-list) DRY_RUN=1; shift ;;
     *) echo "ERROR: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+if ! printf '%s' "$BATCH_SIZE" | grep -qE '^[0-9]+$' || [ "$BATCH_SIZE" -lt 0 ]; then
+  echo "ERROR: --batch-size must be a non-negative integer" >&2
+  exit 2
+fi
 
 # All non-E2E test files, sorted for deterministic shard splits.
 # Tier 4: *.slow.test.ts is "always-slow" (cold-path correctness checks);
@@ -72,6 +79,41 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 echo "[unit-shard ${SHARD:-(unsharded)}] running ${#files[@]} files"
+run_test_files() {
+  if [ -n "$MAX_CONC" ]; then
+    bun test --max-concurrency="$MAX_CONC" --timeout=60000 "$@"
+  else
+    bun test --timeout=60000 "$@"
+  fi
+}
+
+if [ "$BATCH_SIZE" -gt 0 ] && [ "${#files[@]}" -gt "$BATCH_SIZE" ]; then
+  total_batches=$(( (${#files[@]} + BATCH_SIZE - 1) / BATCH_SIZE ))
+  batch_number=0
+  offset=0
+  while [ "$offset" -lt "${#files[@]}" ]; do
+    batch=("${files[@]:offset:BATCH_SIZE}")
+    batch_regular=()
+    batch_isolated=()
+    for candidate in "${batch[@]}"; do
+      case "$(basename "$candidate")" in
+        *cli*.test.ts) batch_isolated+=("$candidate") ;;
+        *) batch_regular+=("$candidate") ;;
+      esac
+    done
+    batch_number=$((batch_number + 1))
+    echo "[unit-shard ${SHARD:-(unsharded)}] batch $batch_number/$total_batches (${#batch[@]} files)"
+    if [ "${#batch_regular[@]}" -gt 0 ]; then
+      run_test_files "${batch_regular[@]}"
+    fi
+    for isolated in "${batch_isolated[@]}"; do
+      echo "[unit-shard ${SHARD:-(unsharded)}] isolated $(basename "$isolated")"
+      run_test_files "$isolated"
+    done
+    offset=$((offset + BATCH_SIZE))
+  done
+  exit 0
+fi
 if [ -n "$MAX_CONC" ]; then
   exec bun test --max-concurrency="$MAX_CONC" --timeout=60000 "${files[@]}"
 fi

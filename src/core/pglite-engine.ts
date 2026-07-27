@@ -64,11 +64,15 @@ type PGLiteDB = PGlite;
 
 // Tier 3 snapshot fast-restore. Reads a tar dump produced by
 // `bun run scripts/build-pglite-snapshot.ts`. Snapshot is matched against
-// the current MIGRATIONS hash via a sidecar `.version` file; on mismatch we
-// silently fall through to a normal initSchema (snapshot is just an
-// optimization, never authoritative).
+// the current schema, migrations, and dimension-sensitive schema inputs via
+// a sidecar `.version` file; on mismatch we silently fall through to a normal
+// initSchema (snapshot is just an optimization, never authoritative).
 let _snapshotWarnLogged = false;
-function tryLoadSnapshot(snapshotPath: string): Blob | null {
+function tryLoadSnapshot(
+  snapshotPath: string,
+  embeddingDimensions: number,
+  embeddingModel: string,
+): Blob | null {
   try {
     // Lazy require so production builds without these imports don't crash.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -94,7 +98,13 @@ function tryLoadSnapshot(snapshotPath: string): Blob | null {
       }
       return null;
     }
-    const expectedHash = computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+    const expectedHash = computeSnapshotSchemaHash(
+      MIGRATIONS,
+      PGLITE_SCHEMA_SQL,
+      crypto,
+      embeddingDimensions,
+      embeddingModel,
+    );
     const actualHash = fs.readFileSync(versionPath, 'utf8').trim();
     if (expectedHash !== actualHash) {
       if (!_snapshotWarnLogged) {
@@ -116,10 +126,16 @@ export function computeSnapshotSchemaHash(
   migrations: Array<{ version: number; name: string; sql?: string; sqlFor?: { pglite?: string } }>,
   schemaSQL: string,
   crypto: typeof import('node:crypto'),
+  embeddingDimensions: number = DEFAULT_EMBEDDING_DIMENSIONS,
+  embeddingModel: string = DEFAULT_EMBEDDING_MODEL,
 ): string {
   const hash = crypto.createHash('sha256');
   hash.update('schema:');
   hash.update(schemaSQL);
+  hash.update('\nembedding_dimensions:');
+  hash.update(String(embeddingDimensions));
+  hash.update('\nembedding_model:');
+  hash.update(embeddingModel);
   hash.update('\nmigrations:\n');
   for (const m of migrations) {
     hash.update(String(m.version));
@@ -257,7 +273,18 @@ export class PGLiteEngine implements BrainEngine {
     // file silently falls back to normal init.
     let loadDataDir: Blob | undefined;
     if (!dataDir && process.env.GBRAIN_PGLITE_SNAPSHOT) {
-      const snapshotResult = tryLoadSnapshot(process.env.GBRAIN_PGLITE_SNAPSHOT);
+      let snapshotDimensions = DEFAULT_EMBEDDING_DIMENSIONS;
+      let snapshotModel = DEFAULT_EMBEDDING_MODEL;
+      try {
+        const gw = await import('./ai/gateway.ts');
+        snapshotDimensions = gw.getEmbeddingDimensions();
+        snapshotModel = gw.getEmbeddingModel() || snapshotModel;
+      } catch { /* gateway not configured — use defaults */ }
+      const snapshotResult = tryLoadSnapshot(
+        process.env.GBRAIN_PGLITE_SNAPSHOT,
+        snapshotDimensions,
+        snapshotModel,
+      );
       if (snapshotResult) {
         loadDataDir = snapshotResult;
         this._snapshotLoaded = true;

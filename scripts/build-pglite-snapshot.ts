@@ -25,9 +25,19 @@ import * as crypto from "node:crypto";
 import { PGLiteEngine, computeSnapshotSchemaHash } from "../src/core/pglite-engine.ts";
 import { MIGRATIONS } from "../src/core/migrate.ts";
 import { PGLITE_SCHEMA_SQL } from "../src/core/pglite-schema.ts";
+import {
+  DEFAULT_EMBEDDING_DIMENSIONS,
+  DEFAULT_EMBEDDING_MODEL,
+} from "../src/core/ai/defaults.ts";
 
 function computeSchemaHash(): string {
-  return computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+  return computeSnapshotSchemaHash(
+    MIGRATIONS,
+    PGLITE_SCHEMA_SQL,
+    crypto,
+    DEFAULT_EMBEDDING_DIMENSIONS,
+    DEFAULT_EMBEDDING_MODEL,
+  );
 }
 
 async function main() {

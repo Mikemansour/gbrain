@@ -57,6 +57,11 @@ const ALL_TABLES = [
   'minion_attachments',
   'minion_inbox',
   'minion_jobs',
+  // Must be last: most content tables reference sources. Leaving sources
+  // intact leaks sole-non-default auto-routing across sequential E2E files
+  // (for example engine-parity's /tmp/beta source makes a later recall test
+  // route to beta even after every fact/page table was reset).
+  'sources',
 ];
 
 /**

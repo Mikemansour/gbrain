@@ -588,7 +588,10 @@ describeBoth('Engine parity — relationalFanout', () => {
   }, 30_000);
 
   const shape = (rows: Awaited<ReturnType<BrainEngine['relationalFanout']>>) =>
-    rows.map(r => `${r.source_id}:${r.slug}:${r.hop}:${r.edge_count}:${r.via_link_types.join(',')}:${r.path.join('>')}:${r.canonical_chunk_id ?? 'null'}`);
+    // Numeric row IDs are engine-local sequence values and need not match
+    // after logically equivalent fixture setup. Parity here is whether a
+    // canonical chunk was selected, alongside the engine-independent path.
+    rows.map(r => `${r.source_id}:${r.slug}:${r.hop}:${r.edge_count}:${r.via_link_types.join(',')}:${r.path.join('>')}:${r.canonical_chunk_id == null ? 'null' : 'present'}`);
 
   test('typed-edge fan-out is identical across engines', async () => {
     const opts = { direction: 'in' as const, linkTypes: ['invested_in'] };

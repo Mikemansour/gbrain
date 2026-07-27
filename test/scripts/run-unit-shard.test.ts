@@ -29,6 +29,19 @@ function dryRunList(): string[] {
   return out.split('\n').map(s => s.trim()).filter(Boolean);
 }
 
+function batchedDryRunList(): string[] {
+  const out = execFileSync(
+    'bash',
+    [SHARD_SH, '--batch-size=25', '--max-concurrency=2', '--dry-run-list'],
+    {
+      cwd: REPO_ROOT,
+      encoding: 'utf-8',
+      env: { ...process.env, SHARD: '' },
+    },
+  );
+  return out.split('\n').map(s => s.trim()).filter(Boolean);
+}
+
 describe('run-unit-shard.sh exclusion symmetry', () => {
   it('lists at least one plain *.test.ts file', () => {
     const files = dryRunList();
@@ -52,5 +65,9 @@ describe('run-unit-shard.sh exclusion symmetry', () => {
     const files = dryRunList();
     const leaks = files.filter(f => f.startsWith('test/e2e/'));
     expect(leaks).toEqual([]);
+  });
+
+  it('batch and concurrency controls do not change dry-run selection', () => {
+    expect(batchedDryRunList()).toEqual(dryRunList());
   });
 });

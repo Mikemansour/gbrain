@@ -59,12 +59,8 @@ fi
 
 # Portable mktemp: explicit XXXXXX is required by GNU mktemp on Linux CI.
 # `-t prefix` works on BSD but errors on GNU when the template lacks Xs.
-E2E_TMP_HOME=$(mktemp -d "${TMPDIR:-/tmp}/gbrain-e2e.XXXXXX")
-trap 'rm -rf "$E2E_TMP_HOME"' EXIT
-
-export HOME="$E2E_TMP_HOME"
-export GBRAIN_HOME="$E2E_TMP_HOME"
-mkdir -p "$E2E_TMP_HOME/.gbrain"
+E2E_TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gbrain-e2e.XXXXXX")
+trap 'rm -rf "$E2E_TMP_ROOT"' EXIT
 
 # --- Hermetic env scrub: operator/agent context must not bleed into E2E ---
 # A dev shell or a Conductor workspace exports CONDUCTOR_*, MCP_*, OPENCLAW_*,
@@ -79,7 +75,8 @@ mkdir -p "$E2E_TMP_HOME/.gbrain"
 # buildHermeticEnv() allowlist to gbrain's shell E2E runner.
 for _e2e_var in $(env | grep -oE '^(CONDUCTOR_|MCP_|OPENCLAW_|GBRAIN_)[A-Za-z0-9_]*' | sort -u); do
   case "$_e2e_var" in
-    GBRAIN_HOME) ;;  # required for HOME isolation (set above) — keep
+    GBRAIN_HOME) ;;  # caller/per-file HOME isolation override — keep
+    GBRAIN_TEST_DB) ;;  # ci-local's guarded, test-shaped schema-reset opt-in
     *) unset "$_e2e_var" || true ;;
   esac
 done
@@ -152,6 +149,13 @@ for f in "${files[@]}"; do
   name=$(basename "$f")
   echo ""
   echo "=== $name ==="
+  # One HOME per file. A shared shard-level HOME lets a test that exercises
+  # init/thin-client config silently change transport selection for every
+  # later file, even though Bun and the database are otherwise reset.
+  E2E_FILE_HOME=$(mktemp -d "$E2E_TMP_ROOT/file.XXXXXX")
+  export HOME="$E2E_FILE_HOME"
+  export GBRAIN_HOME="$E2E_FILE_HOME"
+  mkdir -p "$E2E_FILE_HOME/.gbrain"
   # Cross-file isolation: terminate any stale connections from the prior
   # file's pool before the next file's setupDB() runs. Without this,
   # idle postgres connections from the previous bun process race with
