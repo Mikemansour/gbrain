@@ -2,10 +2,12 @@
  * Migration C1: exhaustive thin-client façade classification plus empirical
  * proof for every admitted command.
  *
- * The migration façade admits only `get`, `query`, and `doctor`. Every other
- * CLI_ONLY command, operation alias, manual alias, and unknown root is denied
- * before the real binary is launched. This test derives the command inventory
- * from source so a future CLI addition cannot silently escape classification.
+ * The migration façade admits only `get` and `query`. `doctor` is proven to
+ * have a remote route, but remains outside V1 because its `admin` scope implies
+ * write. Every CLI_ONLY command, operation alias, manual alias, and unknown
+ * root is denied before the real binary is launched. This test derives the
+ * command inventory from source so a future CLI addition cannot silently
+ * escape classification.
  *
  * The admitted commands are also spawned against a hermetic loopback OAuth +
  * MCP fixture from a nested GBRAIN_HOME. Successful remote requests and a
@@ -40,7 +42,8 @@ import { operations } from '../src/core/operations.ts';
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
 const CLI_SOURCE = readFileSync(CLI, 'utf8');
-const ADMITTED = new Set(['get', 'query', 'doctor']);
+const ADMITTED = new Set(['get', 'query']);
+const REMOTE_CAPABLE = new Set(['get', 'query', 'doctor']);
 const MANUAL_ALIASES = new Set(['ask']);
 
 function literalSet(name: string): Set<string> {
@@ -71,11 +74,12 @@ function facadeDecision(root: string): 'remote' | 'refuse' {
 }
 
 describe('C1 exhaustive façade classification', () => {
-  test('every CLI_ONLY root is covered and only doctor is admitted', () => {
+  test('every CLI_ONLY root is covered and refused by the V1 façade', () => {
     expect(CLI_ONLY.size).toBeGreaterThan(70);
     for (const root of CLI_ONLY) {
-      expect(facadeDecision(root)).toBe(root === 'doctor' ? 'remote' : 'refuse');
+      expect(facadeDecision(root)).toBe('refuse');
     }
+    expect(REMOTE_CAPABLE.has('doctor')).toBe(true);
     expect(CLI_ONLY.has('graph-query')).toBe(true);
     expect(facadeDecision('graph-query')).toBe('refuse');
   });
@@ -284,7 +288,7 @@ function localDatabaseArtifacts(): string[] {
   );
 }
 
-describe('C1 empirical admitted routes', () => {
+describe('C1 empirical remote-capable routes', () => {
   test('get and query each dispatch exactly once to the remote owner', async () => {
     toolCalls.length = 0;
     const getResult = await runCli(['get', 'fixture-page']);
@@ -303,7 +307,7 @@ describe('C1 empirical admitted routes', () => {
     expect(localDatabaseArtifacts()).toEqual([]);
   }, 30_000);
 
-  test('doctor uses the thin-client report and never opens local PGLite', async () => {
+  test('doctor remote proof remains available for future façade review', async () => {
     const result = await runCli(['doctor', '--json']);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain('"mode":"thin-client"');
