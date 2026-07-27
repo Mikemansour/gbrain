@@ -55,6 +55,7 @@ const run_dream_cycle: Operation = {
   },
   mutating: true,
   scope: 'admin',
+  area: 'sync',
   handler: async (ctx, p) => {
     const { ALL_PHASES, runCycle } = await import('../cycle.ts');
     const requested = p.phases as unknown;
