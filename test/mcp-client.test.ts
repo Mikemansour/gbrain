@@ -21,6 +21,7 @@ import {
   callRemoteTool,
   unpackToolResult,
   RemoteMcpError,
+  selectClientCredentialsTokenEndpoint,
   _clearMcpClientTokenCache,
 } from '../src/core/mcp-client.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
@@ -35,13 +36,17 @@ let mcpResponseFor: (req: { method: string; params?: unknown }) => unknown = () 
 let mcpStatusOverride: number | null = null;
 let tokenMintCount = 0;
 let tokenExpiresIn = 3600;
+let advertisedTokenEndpoint: string | null = null;
 
 beforeAll(async () => {
   server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (req.url === '/.well-known/oauth-authorization-server') {
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ token_endpoint: `http://127.0.0.1:${port}/token`, issuer: `http://127.0.0.1:${port}` }));
+      res.end(JSON.stringify({
+        token_endpoint: advertisedTokenEndpoint ?? `http://127.0.0.1:${port}/token`,
+        issuer: `http://127.0.0.1:${port}`,
+      }));
       return;
     }
     if (req.url === '/token') {
@@ -112,6 +117,7 @@ beforeEach(() => {
   tokenStatus = 200;
   tokenMintCount = 0;
   tokenExpiresIn = 3600;
+  advertisedTokenEndpoint = null;
   mcpStatusOverride = null;
   mcpResponseFor = () => ({ content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
   _clearMcpClientTokenCache();
@@ -152,6 +158,44 @@ describe('callRemoteTool — happy path', () => {
     expect(tokenMintCount).toBe(1);
     await callRemoteTool(makeConfig(), 'second', {});
     expect(tokenMintCount).toBe(2);
+  });
+
+  test('loopback issuer never posts its confidential secret to an advertised off-origin token endpoint', async () => {
+    let offOriginRequests = 0;
+    const sink = createServer(async (req, res) => {
+      offOriginRequests++;
+      for await (const _chunk of req) {
+        // Drain the body if a regression sends one.
+      }
+      res.statusCode = 500;
+      res.end();
+    });
+    await new Promise<void>(resolve => sink.listen(0, '127.0.0.1', resolve));
+    const address = sink.address();
+    if (!address || typeof address === 'string') throw new Error('failed to bind credential sink');
+    advertisedTokenEndpoint = `http://127.0.0.1:${address.port}/capture`;
+
+    try {
+      await callRemoteTool(makeConfig(), 'noop', {});
+      expect(offOriginRequests).toBe(0);
+      expect(tokenMintCount).toBe(1);
+    } finally {
+      await new Promise<void>(resolve => sink.close(() => resolve()));
+    }
+  });
+
+  test('canonical loopback spellings all pin confidential minting to loopback', () => {
+    for (const [issuer, expected] of [
+      ['http://localhost.:3131', 'http://localhost.:3131/token'],
+      ['http://[::1]:3131', 'http://[::1]:3131/token'],
+      ['http://[::ffff:127.0.0.1]:3131', 'http://[::ffff:7f00:1]:3131/token'],
+      ['http://127.42.0.9:3131', 'http://127.42.0.9:3131/token'],
+    ]) {
+      expect(selectClientCredentialsTokenEndpoint(
+        issuer,
+        'https://public.example.invalid/token',
+      )).toBe(expected);
+    }
   });
 
   test('passes args through to the tool handler', async () => {
