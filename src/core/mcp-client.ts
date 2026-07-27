@@ -185,7 +185,11 @@ async function getAccessToken(config: GBrainConfig, force = false): Promise<stri
     );
   }
 
-  const tokenRes = await mintClientCredentialsToken(disco.metadata.token_endpoint, remote.oauth_client_id, secret);
+  const tokenEndpoint = selectClientCredentialsTokenEndpoint(
+    remote.issuer_url,
+    disco.metadata.token_endpoint,
+  );
+  const tokenRes = await mintClientCredentialsToken(tokenEndpoint, remote.oauth_client_id, secret);
   if (!tokenRes.ok) {
     throw new RemoteMcpError(
       tokenRes.reason === 'auth' ? 'auth' : tokenRes.reason === 'network' ? 'network' : 'discovery',
@@ -199,6 +203,37 @@ async function getAccessToken(config: GBrainConfig, force = false): Promise<stri
   const token: CachedToken = { access_token: tokenRes.token.access_token, expires_at_ms };
   tokenCache.set(remote.mcp_url, token);
   return token.access_token;
+}
+
+/**
+ * Loopback thin clients trust the configured local owner, not a credential
+ * destination supplied by discovery metadata. The HTTP owner may advertise a
+ * public issuer for browser-facing OAuth clients, but a local confidential
+ * client must never send its secret through that public route. Remote issuers
+ * retain standards-compatible discovery behavior.
+ *
+ * @internal Exported for focused security regression tests.
+ */
+export function selectClientCredentialsTokenEndpoint(
+  issuerUrl: string,
+  advertisedTokenEndpoint: string,
+): string {
+  const issuer = new URL(issuerUrl);
+  const hostname = issuer.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.+$/, '');
+  const ipv4MappedLoopback = /^::ffff:(?:127\.|7f[0-9a-f]{2}:)/i.test(hostname);
+  const loopback = hostname === 'localhost'
+    || hostname === '127.0.0.1'
+    || hostname === '::1'
+    || hostname.startsWith('127.')
+    || ipv4MappedLoopback;
+
+  if (loopback) {
+    return new URL('/token', issuer).toString();
+  }
+  return advertisedTokenEndpoint;
 }
 
 /**
