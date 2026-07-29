@@ -112,6 +112,7 @@ describe('probeLiveness (v0.28.10)', () => {
     const releaseIdentity = {
       release_sha: 'a'.repeat(40),
       content_sha256: 'b'.repeat(64),
+      executable_sha256: 'c'.repeat(64),
       release_root: `/opt/gbrain/releases/${'a'.repeat(40)}`,
     };
     const result = await probeLiveness(
