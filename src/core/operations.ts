@@ -2774,6 +2774,585 @@ const list_link_sources: Operation = {
   cliHints: { name: 'link-sources' },
 };
 
+const AXIOM_GRAPH_CLIENT_NAME = 'polaris-axiom-sync';
+const AXIOM_GRAPH_SOURCE_ID = 'axiom-polaris';
+const AXIOM_GRAPH_LINK_SOURCE = 'axiom-managed-v1';
+const AXIOM_GRAPH_CONTEXT_PREFIX = `${AXIOM_GRAPH_LINK_SOURCE}:`;
+const AXIOM_GRAPH_PAGE_MARKER = 'polaris-v1';
+const AXIOM_GRAPH_MAX_BYTES = 1024 * 1024;
+const AXIOM_GRAPH_MAX_COMPONENTS = 256;
+const AXIOM_GRAPH_MAX_LINKS = 4096;
+const AXIOM_COMPONENT_SLUG = /^axiom-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const AXIOM_METADATA_TOKEN = /^[a-z][a-z0-9_-]{0,63}$/;
+const AXIOM_LINK_TYPE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const AXIOM_ALIAS = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const AXIOM_SYSTEMD_UNIT =
+  /^[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}\.(?:service|socket|target|timer|path|mount)$/;
+const AXIOM_CONTROL_CHARACTER = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+
+interface AxiomGraphComponent {
+  slug: string;
+  status: string;
+  component_type: string;
+  aliases: string[];
+  live?: {
+    systemd_unit?: string;
+    port?: number;
+    health_endpoint?: string;
+  };
+}
+
+interface AxiomGraphLink {
+  from_slug: string;
+  to_slug: string;
+  link_type: string;
+  strength: string;
+  impact: string;
+  context?: string;
+}
+
+interface AxiomManagedGraph {
+  components: AxiomGraphComponent[];
+  links: AxiomGraphLink[];
+}
+
+interface AxiomManagedLinkRow {
+  from_slug: string;
+  to_slug: string;
+  link_type: string;
+  context: string | null;
+  from_source_id: string;
+  to_source_id: string;
+  origin_source_id: string | null;
+}
+
+function axiomObject(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new OperationError('invalid_params', `${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function axiomExactKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const allowList = new Set(allowed);
+  const unknown = Object.keys(value).filter(key => !allowList.has(key));
+  if (unknown.length > 0) {
+    throw new OperationError(
+      'invalid_params',
+      `${label} contains unsupported fields: ${unknown.sort().join(', ')}`,
+    );
+  }
+}
+
+function axiomRequiredString(
+  value: unknown,
+  label: string,
+  maxLength: number,
+  pattern?: RegExp,
+): string {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > maxLength
+    || AXIOM_CONTROL_CHARACTER.test(value)
+    || (pattern !== undefined && !pattern.test(value))
+  ) {
+    throw new OperationError('invalid_params', `${label} is invalid`);
+  }
+  return value;
+}
+
+function validateAxiomHealthEndpoint(value: unknown, port: number | undefined): string {
+  const endpoint = axiomRequiredString(value, 'health_endpoint', 2048);
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    throw new OperationError('invalid_params', 'health_endpoint must be a valid URL');
+  }
+  if (
+    url.protocol !== 'http:'
+    || url.hostname !== '127.0.0.1'
+    || url.username !== ''
+    || url.password !== ''
+    || url.hash !== ''
+    || url.search !== ''
+    || url.port === ''
+    || port === undefined
+    || Number(url.port) !== port
+  ) {
+    throw new OperationError(
+      'invalid_params',
+      'health_endpoint must be a loopback HTTP URL on the declared port',
+    );
+  }
+  return endpoint;
+}
+
+function parseAxiomManagedGraph(raw: unknown): AxiomManagedGraph {
+  if (typeof raw !== 'string' || raw.length === 0) {
+    throw new OperationError('invalid_params', 'graph_json must be a non-empty JSON string');
+  }
+  if (new TextEncoder().encode(raw).byteLength > AXIOM_GRAPH_MAX_BYTES) {
+    throw new OperationError('invalid_params', 'graph_json exceeds the 1 MiB limit');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new OperationError('invalid_params', 'graph_json is not valid JSON');
+  }
+  const graph = axiomObject(parsed, 'graph');
+  axiomExactKeys(graph, ['components', 'links'], 'graph');
+  if (!Array.isArray(graph.components) || !Array.isArray(graph.links)) {
+    throw new OperationError('invalid_params', 'graph must contain component and link arrays');
+  }
+  if (
+    graph.components.length === 0
+    || graph.components.length > AXIOM_GRAPH_MAX_COMPONENTS
+    || graph.links.length > AXIOM_GRAPH_MAX_LINKS
+  ) {
+    throw new OperationError('invalid_params', 'graph component or link count is outside the limit');
+  }
+
+  const components = graph.components.map((rawComponent, index): AxiomGraphComponent => {
+    const component = axiomObject(rawComponent, `component ${index}`);
+    axiomExactKeys(
+      component,
+      ['slug', 'status', 'component_type', 'aliases', 'live'],
+      `component ${index}`,
+    );
+    const slug = axiomRequiredString(
+      component.slug,
+      `component ${index} slug`,
+      255,
+      AXIOM_COMPONENT_SLUG,
+    );
+    const status = axiomRequiredString(
+      component.status,
+      `component ${slug} status`,
+      64,
+      AXIOM_METADATA_TOKEN,
+    );
+    const componentType = axiomRequiredString(
+      component.component_type,
+      `component ${slug} component_type`,
+      64,
+      AXIOM_METADATA_TOKEN,
+    );
+    if (component.aliases !== undefined && !Array.isArray(component.aliases)) {
+      throw new OperationError('invalid_params', `component ${slug} aliases must be an array`);
+    }
+    const aliases = (component.aliases ?? []).map((alias, aliasIndex) =>
+      axiomRequiredString(
+        alias,
+        `component ${slug} alias ${aliasIndex}`,
+        128,
+        AXIOM_ALIAS,
+      ));
+    if (aliases.length > 32 || new Set(aliases).size !== aliases.length) {
+      throw new OperationError('invalid_params', `component ${slug} aliases are invalid`);
+    }
+
+    let live: AxiomGraphComponent['live'];
+    if (component.live !== undefined) {
+      const rawLive = axiomObject(component.live, `component ${slug} live`);
+      axiomExactKeys(
+        rawLive,
+        ['systemd_unit', 'port', 'health_endpoint'],
+        `component ${slug} live`,
+      );
+      const systemdUnit = rawLive.systemd_unit === undefined
+        ? undefined
+        : axiomRequiredString(
+          rawLive.systemd_unit,
+          `component ${slug} systemd_unit`,
+          160,
+          AXIOM_SYSTEMD_UNIT,
+        );
+      const port = rawLive.port;
+      if (
+        port !== undefined
+        && (!Number.isInteger(port) || Number(port) < 1 || Number(port) > 65535)
+      ) {
+        throw new OperationError('invalid_params', `component ${slug} port is invalid`);
+      }
+      const healthEndpoint = rawLive.health_endpoint === undefined
+        ? undefined
+        : validateAxiomHealthEndpoint(rawLive.health_endpoint, port as number | undefined);
+      live = {
+        ...(systemdUnit === undefined ? {} : { systemd_unit: systemdUnit }),
+        ...(port === undefined ? {} : { port: Number(port) }),
+        ...(healthEndpoint === undefined ? {} : { health_endpoint: healthEndpoint }),
+      };
+    }
+    return {
+      slug,
+      status,
+      component_type: componentType,
+      aliases,
+      ...(live === undefined ? {} : { live }),
+    };
+  });
+
+  const componentSlugs = new Set(components.map(component => component.slug));
+  if (componentSlugs.size !== components.length) {
+    throw new OperationError('invalid_params', 'component slugs must be unique');
+  }
+
+  const links = graph.links.map((rawLink, index): AxiomGraphLink => {
+    const link = axiomObject(rawLink, `link ${index}`);
+    axiomExactKeys(
+      link,
+      ['from_slug', 'to_slug', 'link_type', 'strength', 'impact', 'context'],
+      `link ${index}`,
+    );
+    const fromSlug = axiomRequiredString(
+      link.from_slug,
+      `link ${index} from_slug`,
+      255,
+      AXIOM_COMPONENT_SLUG,
+    );
+    const toSlug = axiomRequiredString(
+      link.to_slug,
+      `link ${index} to_slug`,
+      255,
+      AXIOM_COMPONENT_SLUG,
+    );
+    if (!componentSlugs.has(fromSlug) || !componentSlugs.has(toSlug) || fromSlug === toSlug) {
+      throw new OperationError('invalid_params', `link ${fromSlug}->${toSlug} is invalid`);
+    }
+    const linkType = axiomRequiredString(
+      link.link_type,
+      `link ${index} link_type`,
+      128,
+      AXIOM_LINK_TYPE,
+    );
+    const strength = axiomRequiredString(
+      link.strength,
+      `link ${index} strength`,
+      64,
+      AXIOM_METADATA_TOKEN,
+    );
+    const impact = axiomRequiredString(
+      link.impact,
+      `link ${index} impact`,
+      64,
+      AXIOM_METADATA_TOKEN,
+    );
+    const context = link.context === undefined || link.context === null
+      ? undefined
+      : axiomRequiredString(link.context, `link ${index} context`, 4096);
+    return {
+      from_slug: fromSlug,
+      to_slug: toSlug,
+      link_type: linkType,
+      strength,
+      impact,
+      ...(context === undefined ? {} : { context }),
+    };
+  });
+  const linkKeys = links.map(link =>
+    `${link.from_slug}\0${link.to_slug}\0${link.link_type}`);
+  if (new Set(linkKeys).size !== linkKeys.length) {
+    throw new OperationError('invalid_params', 'typed graph links must be unique');
+  }
+  return { components, links };
+}
+
+function requireAxiomGraphCaller(ctx: OperationContext): void {
+  const auth = ctx.auth;
+  const scopes = [...(auth?.scopes ?? [])].sort();
+  if (
+    ctx.remote !== true
+    || auth === undefined
+    || auth.clientName !== AXIOM_GRAPH_CLIENT_NAME
+    || auth.sourceId !== AXIOM_GRAPH_SOURCE_ID
+    || ctx.sourceId !== AXIOM_GRAPH_SOURCE_ID
+    || auth.allowedSources?.length !== 1
+    || auth.allowedSources[0] !== AXIOM_GRAPH_SOURCE_ID
+    || scopes.length !== 2
+    || scopes[0] !== 'read'
+    || scopes[1] !== 'write'
+  ) {
+    throw new OperationError(
+      'permission_denied',
+      'reconcile_axiom_graph requires its dedicated source-scoped OAuth client',
+    );
+  }
+}
+
+function axiomPageTitle(slug: string): string {
+  return slug
+    .replace(/^axiom-/, '')
+    .split('-')
+    .map(part => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function axiomManagedLinkKey(
+  link: Pick<AxiomGraphLink, 'from_slug' | 'to_slug' | 'link_type'>,
+): string {
+  return `${link.from_slug}\0${link.to_slug}\0${link.link_type}`;
+}
+
+function axiomManagedLinkContext(link: AxiomGraphLink): string {
+  return AXIOM_GRAPH_CONTEXT_PREFIX + JSON.stringify({
+    impact: link.impact,
+    strength: link.strength,
+    ...(link.context === undefined ? {} : { detail: link.context }),
+  });
+}
+
+async function listAxiomManagedLinks(engine: BrainEngine): Promise<AxiomManagedLinkRow[]> {
+  return engine.executeRaw<AxiomManagedLinkRow>(
+    `SELECT f.slug AS from_slug, t.slug AS to_slug, l.link_type, l.context,
+            f.source_id AS from_source_id, t.source_id AS to_source_id,
+            o.source_id AS origin_source_id
+       FROM links l
+       JOIN pages f ON f.id = l.from_page_id
+      JOIN pages t ON t.id = l.to_page_id
+       LEFT JOIN pages o ON o.id = l.origin_page_id
+      WHERE l.link_source = $1
+        AND (f.source_id = $2 OR t.source_id = $2 OR o.source_id = $2)
+      ORDER BY f.slug, t.slug, l.link_type`,
+    [AXIOM_GRAPH_LINK_SOURCE, AXIOM_GRAPH_SOURCE_ID],
+  );
+}
+
+const reconcile_axiom_graph: Operation = {
+  name: 'reconcile_axiom_graph',
+  description:
+    'Atomically reconcile the dedicated infrastructure graph source. Restricted to its source-scoped OAuth client.',
+  params: {
+    graph_json: {
+      type: 'string',
+      required: true,
+      description: 'Strict JSON graph document supplied on stdin by the dedicated sync client',
+    },
+  },
+  mutating: true,
+  scope: 'write',
+  cliHints: {
+    name: 'reconcile-axiom-graph',
+    stdin: 'graph_json',
+  },
+  handler: async (ctx, params) => {
+    requireAxiomGraphCaller(ctx);
+    const graphJson = params.graph_json as string;
+    const graph = parseAxiomManagedGraph(graphJson);
+    const { createHash } = await import('crypto');
+    const graphSha256 = createHash('sha256').update(graphJson).digest('hex');
+    const expectedLinks = new Map(
+      graph.links.map(link => [
+        axiomManagedLinkKey(link),
+        axiomManagedLinkContext(link),
+      ]),
+    );
+
+    return ctx.engine.transaction(async tx => {
+      const before = await listAxiomManagedLinks(tx);
+      const crossSource = before.find(row =>
+        row.from_source_id !== AXIOM_GRAPH_SOURCE_ID
+        || row.to_source_id !== AXIOM_GRAPH_SOURCE_ID
+        || (
+          row.origin_source_id !== null
+          && row.origin_source_id !== AXIOM_GRAPH_SOURCE_ID
+        ));
+      if (crossSource !== undefined) {
+        throw new OperationError(
+          'permission_denied',
+          'managed graph provenance crosses the dedicated source boundary',
+        );
+      }
+
+      let pagesCreated = 0;
+      let pagesUpdated = 0;
+      for (const component of graph.components) {
+        const existing = await tx.getPage(component.slug, {
+          sourceId: AXIOM_GRAPH_SOURCE_ID,
+          includeDeleted: true,
+        });
+        if (existing?.deleted_at) {
+          throw new OperationError(
+            'database_error',
+            `managed page ${component.slug} is soft-deleted; restore it before reconciliation`,
+          );
+        }
+        const prior = existing?.frontmatter
+          && typeof existing.frontmatter === 'object'
+          && !Array.isArray(existing.frontmatter)
+          ? existing.frontmatter
+          : {};
+        const {
+          status: _priorStatus,
+          component_type: _priorComponentType,
+          aliases: priorAliases,
+          axiom_managed_aliases: priorManagedAliases,
+          axiom_managed: _priorManaged,
+          axiom_schema_version: _priorSchemaVersion,
+          systemd_unit: _priorSystemdUnit,
+          port: _priorPort,
+          health_endpoint: _priorHealthEndpoint,
+          ...unmanagedFrontmatter
+        } = prior;
+        void _priorStatus;
+        void _priorComponentType;
+        void _priorManaged;
+        void _priorSchemaVersion;
+        void _priorSystemdUnit;
+        void _priorPort;
+        void _priorHealthEndpoint;
+        const existingAliases = Array.isArray(priorAliases)
+          ? priorAliases.filter((alias): alias is string => typeof alias === 'string')
+          : [];
+        const previouslyManagedAliases = new Set(
+          Array.isArray(priorManagedAliases)
+            ? priorManagedAliases.filter(
+              (alias): alias is string => typeof alias === 'string',
+            )
+            : [],
+        );
+        const unmanagedAliases = existingAliases.filter(
+          alias => !previouslyManagedAliases.has(alias),
+        );
+        const aliases = [...new Set([...unmanagedAliases, ...component.aliases])].sort();
+        const pageType = existing?.type
+          ?? (typeof prior.type === 'string' && prior.type.length > 0
+            ? prior.type
+            : 'infrastructure');
+        const title = existing?.title
+          || (typeof prior.title === 'string' && prior.title.length > 0
+            ? prior.title
+            : `Axiom ${axiomPageTitle(component.slug)}`);
+        const frontmatter: Record<string, unknown> = {
+          ...unmanagedFrontmatter,
+          type: pageType,
+          title,
+          status: component.status,
+          component_type: component.component_type,
+          aliases,
+          axiom_managed_aliases: [...component.aliases].sort(),
+          axiom_managed: AXIOM_GRAPH_PAGE_MARKER,
+          axiom_schema_version: 1,
+          ...(component.live?.systemd_unit === undefined
+            ? {}
+            : { systemd_unit: component.live.systemd_unit }),
+          ...(component.live?.port === undefined
+            ? {}
+            : { port: component.live.port }),
+          ...(component.live?.health_endpoint === undefined
+            ? {}
+            : { health_endpoint: component.live.health_endpoint }),
+        };
+        await tx.putPage(
+          component.slug,
+          {
+            type: pageType,
+            title,
+            compiled_truth: existing?.compiled_truth?.trim()
+              ? existing.compiled_truth
+              : `# ${title}\n\nManaged infrastructure dependency node.`,
+            timeline: existing?.timeline ?? '',
+            frontmatter,
+          },
+          { sourceId: AXIOM_GRAPH_SOURCE_ID },
+        );
+        if (existing === null) pagesCreated += 1;
+        else pagesUpdated += 1;
+      }
+
+      let managedLinksRemoved = 0;
+      for (const row of before) {
+        if (expectedLinks.has(axiomManagedLinkKey(row))) continue;
+        await tx.removeLink(
+          row.from_slug,
+          row.to_slug,
+          row.link_type,
+          AXIOM_GRAPH_LINK_SOURCE,
+          {
+            fromSourceId: AXIOM_GRAPH_SOURCE_ID,
+            toSourceId: AXIOM_GRAPH_SOURCE_ID,
+          },
+        );
+        managedLinksRemoved += 1;
+      }
+      for (const link of graph.links) {
+        await tx.addLink(
+          link.from_slug,
+          link.to_slug,
+          axiomManagedLinkContext(link),
+          link.link_type,
+          AXIOM_GRAPH_LINK_SOURCE,
+          undefined,
+          undefined,
+          {
+            fromSourceId: AXIOM_GRAPH_SOURCE_ID,
+            toSourceId: AXIOM_GRAPH_SOURCE_ID,
+          },
+        );
+      }
+
+      const after = await listAxiomManagedLinks(tx);
+      const observed = new Set<string>();
+      for (const row of after) {
+        if (
+          row.from_source_id !== AXIOM_GRAPH_SOURCE_ID
+          || row.to_source_id !== AXIOM_GRAPH_SOURCE_ID
+          || (
+            row.origin_source_id !== null
+            && row.origin_source_id !== AXIOM_GRAPH_SOURCE_ID
+          )
+        ) {
+          throw new OperationError(
+            'database_error',
+            'managed graph verification observed a cross-source edge',
+          );
+        }
+        const key = axiomManagedLinkKey(row);
+        const expectedContext = expectedLinks.get(key);
+        if (
+          expectedContext === undefined
+          || row.context !== expectedContext
+          || observed.has(key)
+        ) {
+          throw new OperationError(
+            'database_error',
+            'managed graph verification observed unexpected edge state',
+          );
+        }
+        observed.add(key);
+      }
+      if (
+        observed.size !== expectedLinks.size
+        || [...expectedLinks.keys()].some(key => !observed.has(key))
+      ) {
+        throw new OperationError(
+          'database_error',
+          'managed graph verification did not observe the exact expected edge set',
+        );
+      }
+
+      return {
+        source_id: AXIOM_GRAPH_SOURCE_ID,
+        graph_sha256: graphSha256,
+        components: graph.components.length,
+        links: graph.links.length,
+        pages_created: pagesCreated,
+        pages_updated: pagesUpdated,
+        managed_links_removed: managedLinksRemoved,
+        verified_managed_edges: observed.size,
+        committed_atomically: true,
+      };
+    });
+  },
+};
+
 /**
  * Hard cap on traverse_graph depth from MCP callers. Each recursive CTE iteration
  * grows a `visited` array per path; in `direction=both` the join is `OR`-based and
@@ -7278,7 +7857,8 @@ export const operations: Operation[] = [
   // Tags
   add_tag, remove_tag, get_tags,
   // Links
-  add_link, remove_link, get_links, get_backlinks, list_link_sources, traverse_graph,
+  add_link, remove_link, get_links, get_backlinks, list_link_sources,
+  reconcile_axiom_graph, traverse_graph,
   // Timeline
   add_timeline_entry, get_timeline,
   // Admin
