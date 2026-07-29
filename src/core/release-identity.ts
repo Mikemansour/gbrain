@@ -6,6 +6,7 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  realpathSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
@@ -40,6 +41,9 @@ export function loadReleaseIdentity(
   if (!SHA_RE.test(expectedSha)) fail('expected SHA is invalid');
 
   const executable = resolve(executablePath);
+  if (realpathSync(executable) !== executable) {
+    fail('process executable path must not traverse symlinks');
+  }
   const releaseRoot = dirname(dirname(executable));
   if (basename(releaseRoot) !== expectedSha) {
     fail('executable is not rooted in the expected release directory');

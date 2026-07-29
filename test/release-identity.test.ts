@@ -169,6 +169,17 @@ describe('compiled GBrain release identity', () => {
     symlinkSync(actualBin, bin);
     chmodSync(linkedBin.root, 0o555);
     expect(() => loadReleaseIdentity(SHA, linkedBin.executable))
-      .toThrow(/executable directory must be a real root-owned read-only directory/);
+      .toThrow(/path must not traverse symlinks/);
+  });
+
+  test('symlinked release ancestors fail closed', () => {
+    const release = makeRelease();
+    const parent = dirname(release.root);
+    const alias = join(parent, 'release-parent-alias');
+    symlinkSync(parent, alias);
+    const aliasedExecutable = join(alias, SHA, 'bin', 'gbrain');
+
+    expect(() => loadReleaseIdentity(SHA, aliasedExecutable))
+      .toThrow(/path must not traverse symlinks/);
   });
 });
