@@ -53,6 +53,11 @@ import { writeSurfaceChangeAudit } from '../core/surface-audit.ts';
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { loadConfig } from '../core/config.ts';
 import { buildError, serializeError } from '../core/errors.ts';
+import { isValidSourceId } from '../core/source-id.ts';
+import {
+  loadReleaseIdentity,
+  type GBrainReleaseIdentity,
+} from '../core/release-identity.ts';
 import { VERSION } from '../version.ts';
 import * as db from '../core/db.ts';
 import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
@@ -74,6 +79,46 @@ import { registerCleanup } from '../core/process-cleanup.ts';
  * 3s leaves 2s of headroom for TCP, response framing, and clock skew.
  */
 export const HEALTH_TIMEOUT_MS = 3000;
+
+export interface AdminSourceGrant {
+  sourceId: string;
+  federatedRead: string[] | undefined;
+}
+
+/**
+ * Normalize the source authority attached to an admin-minted OAuth client.
+ * Source identifiers use the same canonical contract as every other GBrain
+ * entrypoint. Omitting both fields preserves the legacy default-source
+ * behavior; providing a read federation requires the write source to be one
+ * of the explicitly listed sources.
+ */
+export function normalizeAdminSourceGrant(
+  rawSourceId: unknown,
+  rawFederatedRead: unknown,
+): AdminSourceGrant {
+  const sourceId = rawSourceId === undefined ? 'default' : rawSourceId;
+  if (!isValidSourceId(sourceId)) {
+    throw new Error('sourceId must be a valid registered source identifier');
+  }
+  if (rawFederatedRead === undefined) {
+    return { sourceId, federatedRead: undefined };
+  }
+  if (
+    !Array.isArray(rawFederatedRead)
+    || rawFederatedRead.length === 0
+    || rawFederatedRead.length > 32
+    || rawFederatedRead.some(value => !isValidSourceId(value))
+  ) {
+    throw new Error(
+      'federatedRead must contain 1-32 valid source identifiers',
+    );
+  }
+  const federatedRead = [...new Set(rawFederatedRead as string[])].sort();
+  if (!federatedRead.includes(sourceId)) {
+    throw new Error('federatedRead must include the write source');
+  }
+  return { sourceId, federatedRead };
+}
 
 /**
  * The narrowest contract this module actually consumes: subscribe, unsubscribe.
@@ -344,6 +389,7 @@ export async function probeLiveness(
   engineName: string,
   version: string,
   timeoutMs: number = HEALTH_TIMEOUT_MS,
+  releaseIdentity: GBrainReleaseIdentity | null = null,
 ): Promise<ProbeHealthResult> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   try {
@@ -356,7 +402,12 @@ export async function probeLiveness(
     return {
       ok: true,
       status: 200,
-      body: { status: 'ok', version, engine: engineName },
+      body: {
+        status: 'ok',
+        version,
+        engine: engineName,
+        ...(releaseIdentity ?? {}),
+      },
     };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'unknown';
@@ -641,6 +692,7 @@ export async function embeddingWidthStartupWarning(engine: BrainEngine): Promise
 
 export async function runServeHttp(engine: BrainEngine, options: ServeHttpOptions) {
   const { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams } = options;
+  const releaseIdentity = loadReleaseIdentity();
   // v0.34.1 (#864, D11): default bind flipped from 0.0.0.0 to 127.0.0.1.
   // gbrain's primary use case is a personal-knowledge brain on a laptop;
   // the pre-v0.34 default exposed brains on every interface. Server
@@ -1185,7 +1237,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // /admin/api/full-stats (requireAdmin). See probeLiveness above for the why.
   // ---------------------------------------------------------------------------
   app.get('/health', async (_req, res) => {
-    const result = await probeLiveness(sql, config.engine || 'pglite', VERSION);
+    const result = await probeLiveness(
+      sql,
+      config.engine || 'pglite',
+      VERSION,
+      HEALTH_TIMEOUT_MS,
+      releaseIdentity,
+    );
     res.status(result.status).json(result.body);
   });
 
@@ -1744,9 +1802,38 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       //     and other malformed inputs
       // normalizeScopesInput handles all four valid shapes (string, string[],
       // missing, empty) and rejects the rest with a structured 400.
-      const { name, source, federatedRead, tokenTtl, grantTypes, redirectUris, tokenEndpointAuthMethod } = req.body;
+      const {
+        name,
+        source,
+        tokenTtl,
+        grantTypes,
+        redirectUris,
+        tokenEndpointAuthMethod,
+        sourceId: requestedSourceId,
+        federatedRead,
+      } = req.body;
       const rawScopes = (req.body as Record<string, unknown>).scopes ?? (req.body as Record<string, unknown>).scope;
       if (!name) { res.status(400).json({ error: 'Name required' }); return; }
+      let sourceGrant: AdminSourceGrant;
+      try {
+        if (
+          requestedSourceId !== undefined
+          && source !== undefined
+          && requestedSourceId !== source
+        ) {
+          throw new Error('source and sourceId must match when both are provided');
+        }
+        sourceGrant = normalizeAdminSourceGrant(
+          requestedSourceId ?? source,
+          federatedRead,
+        );
+      } catch (e) {
+        res.status(400).json({
+          error: 'invalid_source_grant',
+          message: e instanceof Error ? e.message : String(e),
+        });
+        return;
+      }
       let scopeString: string;
       try {
         scopeString = normalizeScopesInput(rawScopes);
@@ -1776,27 +1863,14 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         });
         return;
       }
-      // v0.41.x: honor optional `source` (write source_id) and `federatedRead`
-      // (read source set) from the request body, mirroring the CLI's
-      // `--source` / `--federated-read` flags. Omitting both preserves the
-      // historical behavior (source_id='default', federated_read=[source_id]).
-      // Pre-fix this endpoint hardcoded 'default'/undefined, so an admin SPA or
-      // a proxy could never mint a client bound to a non-default brain source
-      // over HTTP — only the CLI could. Validated here for a structured 400.
-      let sourceId: string;
-      let federatedReadIds: string[] | undefined;
-      try {
-        sourceId = normalizeSourceInput(source);
-        federatedReadIds = normalizeFederatedReadInput(federatedRead);
-      } catch (e) {
-        res.status(400).json({
-          error: 'invalid_source',
-          message: e instanceof Error ? e.message : String(e),
-        });
-        return;
-      }
       const result = await oauthProvider.registerClientManual(
-        name, grants, scopeString, uris, sourceId, federatedReadIds, validatedAuthMethod,
+        name,
+        grants,
+        scopeString,
+        uris,
+        sourceGrant.sourceId,
+        sourceGrant.federatedRead,
+        validatedAuthMethod,
       );
       // Set per-client TTL if specified
       if (tokenTtl && Number(tokenTtl) > 0) {

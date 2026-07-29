@@ -107,6 +107,26 @@ describe('probeLiveness (v0.28.10)', () => {
     }
   });
 
+  test('production health binds the sealed release identity', async () => {
+    const sql = makeMockSql(async () => [{ '?column?': 1 }]);
+    const releaseIdentity = {
+      release_sha: 'a'.repeat(40),
+      content_sha256: 'b'.repeat(64),
+      release_root: `/opt/gbrain/releases/${'a'.repeat(40)}`,
+    };
+    const result = await probeLiveness(
+      sql,
+      'pglite',
+      '0.42.53.0',
+      100,
+      releaseIdentity,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.body).toMatchObject(releaseIdentity);
+    }
+  });
+
   test('timeout path: sql hangs → 503 with health_timeout description within 1s', async () => {
     const sql = makeMockSql(() => new Promise(() => { /* never resolves */ }));
     const start = Date.now();

@@ -73,7 +73,7 @@ describe('v0.36.1.x #1077 — admin register-client supports PKCE public clients
     // via `?? `, so this regex no longer requires `scopes` in the inline
     // destructure — it's separately covered by the scope-source check
     // below.
-    expect(src).toMatch(/const\s+\{\s*name,\s*(?:[^}]*?,\s*)?tokenTtl,\s*grantTypes,\s*redirectUris,\s*tokenEndpointAuthMethod\s*\}\s*=\s*req\.body/);
+    expect(src).toMatch(/const\s+\{\s*name,\s*(?:[^}]*?,\s*)?tokenTtl,\s*grantTypes,\s*redirectUris,\s*tokenEndpointAuthMethod,\s*sourceId,\s*federatedRead,\s*\}\s*=\s*req\.body/);
     // v0.39.3.0 WARN-9: the route must still read a `scope`/`scopes` field
     // (under either name) from req.body. Pin the fallback pattern so the
     // PKCE-fix regression contract stays load-bearing.
@@ -88,6 +88,7 @@ describe('v0.36.1.x #1077 — admin register-client supports PKCE public clients
     // is GONE).
     expect(src).toMatch(/validateTokenEndpointAuthMethod\(tokenEndpointAuthMethod\)/);
     expect(src).toMatch(/registerClientManual\([^)]*validatedAuthMethod[^)]*\)/);
+    expect(src).toMatch(/registerClientManual\([^)]*sourceGrant\.sourceId,\s*sourceGrant\.federatedRead,\s*validatedAuthMethod[^)]*\)/);
     // Regression guard: post-insert UPDATE flipping client_secret_hash to
     // NULL based on a runtime check is exactly the non-atomic pattern T4
     // killed. Re-introducing it brings back codex F4.
