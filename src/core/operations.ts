@@ -7993,6 +7993,8 @@ const OP_AREAS: Record<string, string> = {
   // sources
   sources_add: 'sources', sources_list: 'sources', sources_remove: 'sources',
   sources_status: 'sources',
+  // Axiom infrastructure graph reconciliation
+  reconcile_axiom_graph: 'axiom',
   // sync (localOnly)
   sync_brain: 'sync',
   // ingest log
