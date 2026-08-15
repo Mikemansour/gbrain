@@ -334,6 +334,10 @@ fi
 # Container runs as root (uid 0) against a host-uid bind-mount; mark repo +
 # any worktree gitdir as safe so `git status` etc. don't refuse.
 git config --global --add safe.directory '*' || true
+# A linked worktree's administrative gitdir contains an absolute backpointer
+# to the host worktree. Fail here, before expensive checks, if the container
+# mount set does not preserve that round trip.
+git -C /app rev-parse --is-inside-work-tree >/dev/null
 if [ ! -d /app/node_modules ] || [ -z "$(ls -A /app/node_modules 2>/dev/null)" ]; then
   echo "[runner] First run (or --clean): bun install --frozen-lockfile"
   bun install --frozen-lockfile
@@ -359,9 +363,13 @@ if [ -f .git ]; then
     else
       COMMON_GITDIR="$WORKTREE_GITDIR"
     fi
-    # Mount the higher-level common gitdir; covers worktrees/<name> automatically.
+    # Mount the higher-level common gitdir and the worktree at its original
+    # absolute path. The worktree admin dir's `gitdir` file points back to that
+    # host path, so mounting only the common gitdir leaves Git's round-trip
+    # validation broken even though /app/.git itself is visible.
     EXTRA_MOUNTS+=( -v "${COMMON_GITDIR}:${COMMON_GITDIR}:ro" )
-    echo "[ci-local] Worktree detected; mounting shared gitdir: $COMMON_GITDIR"
+    EXTRA_MOUNTS+=( -v "${PWD}:${PWD}:ro" )
+    echo "[ci-local] Worktree detected; mounting shared gitdir + backpointer path: $COMMON_GITDIR, $PWD"
   fi
 fi
 
