@@ -193,7 +193,9 @@ bash scripts/check-trailing-newline.sh
 bash scripts/check-wasm-embedded.sh
 bun run typecheck
 echo "[runner] unit (unsharded, DATABASE_URL unset)"
-env -u DATABASE_URL bash scripts/run-unit-shard.sh
+install -d -m 0700 -o nobody -g nogroup /tmp/unit-home /tmp/unit-tmp
+runuser -u nobody -- env -u DATABASE_URL -u GBRAIN_DATABASE_URL HOME=/tmp/unit-home TMPDIR=/tmp/unit-tmp \
+  bash scripts/run-unit-shard.sh
 echo "[runner] e2e (unsharded, --diff selected)"
 SELECTED=$(bun run scripts/select-e2e.ts)
 if [ -z "$SELECTED" ]; then
@@ -212,7 +214,9 @@ bash scripts/check-trailing-newline.sh
 bash scripts/check-wasm-embedded.sh
 bun run typecheck
 echo "[runner] unit (unsharded, DATABASE_URL unset)"
-env -u DATABASE_URL bash scripts/run-unit-shard.sh
+install -d -m 0700 -o nobody -g nogroup /tmp/unit-home /tmp/unit-tmp
+runuser -u nobody -- env -u DATABASE_URL -u GBRAIN_DATABASE_URL HOME=/tmp/unit-home TMPDIR=/tmp/unit-tmp \
+  bash scripts/run-unit-shard.sh
 echo "[runner] e2e (unsharded)"
 DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
 GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \
@@ -249,6 +253,13 @@ export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
 echo \"[runner] resolving E2E file selection (--diff aware)\"
 ${DIFF_E2E_PREP}
 mkdir -p /tmp/shard-logs
+# Isolate each unit shard's HOME/TMPDIR so concurrent tests cannot see one
+# another's durability files. Run as non-root so chmod(000) permission tests
+# exercise production-like Unix semantics instead of root's DAC bypass.
+for s in 1 2 3 4; do
+  install -d -m 0700 -o nobody -g nogroup /tmp/shard-home-\${s} /tmp/shard-tmp-\${s}
+  runuser -u nobody -- env HOME=/tmp/shard-home-\${s} git config --global --add safe.directory '*'
+done
 echo \"[runner] Tier 1: 4-shard parallel unit + E2E (xargs -P4)\"
 set +e
 printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
@@ -256,7 +267,9 @@ printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
   log=/tmp/shard-logs/shard-\${shard}.log
   echo \"[shard \${shard}] start\" > \$log
   echo \"[shard \${shard}] unit phase (SHARD=\${shard}/4, DATABASE_URL unset)\" >> \$log
-  env -u DATABASE_URL SHARD=\${shard}/4 bash scripts/run-unit-shard.sh >> \$log 2>&1
+  runuser -u nobody -- env -u DATABASE_URL -u GBRAIN_DATABASE_URL \\
+    HOME=/tmp/shard-home-\${shard} TMPDIR=/tmp/shard-tmp-\${shard} SHARD=\${shard}/4 \\
+    bash scripts/run-unit-shard.sh >> \$log 2>&1
   unit_exit=\$?
   if [ \$unit_exit -ne 0 ]; then
     echo \"[shard \${shard}] UNIT FAILED (exit=\$unit_exit)\" >> \$log
