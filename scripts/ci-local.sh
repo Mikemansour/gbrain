@@ -157,7 +157,10 @@ done
 # Step 3: smoke-test run-e2e.sh argv + shard handling.
 echo "[ci-local] Smoke: run-e2e.sh argv + shard..."
 SMOKE_NO_ARGS=$(bash scripts/run-e2e.sh --dry-run-list | wc -l | tr -d ' ')
-EXPECTED_ALL=$(ls test/e2e/*.test.ts | wc -l | tr -d ' ')
+# Keep this independent expectation aligned with run-e2e.sh's full default lane:
+# every test/e2e file plus the root-level phantom redirect parity test whose
+# Postgres arm only runs when DATABASE_URL is available.
+EXPECTED_ALL=$(( $(ls test/e2e/*.test.ts | wc -l | tr -d ' ') + 1 ))
 if [ "$SMOKE_NO_ARGS" != "$EXPECTED_ALL" ]; then
   echo "[ci-local] ERROR: --dry-run-list (no args) printed $SMOKE_NO_ARGS, expected $EXPECTED_ALL" >&2
   exit 1
