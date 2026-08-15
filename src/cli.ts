@@ -328,6 +328,12 @@ function maybeEmitUpdateMarker(command: string): void {
   }
 }
 
+export function thinClientOperationDisposition(
+  op: Operation,
+): 'remote' | 'refuse' {
+  return op.localOnly ? 'refuse' : 'remote';
+}
+
 async function main() {
   // Parse global flags (--quiet / --progress-json / --progress-interval)
   // BEFORE command dispatch, so `gbrain --progress-json doctor` works.
@@ -539,7 +545,7 @@ async function main() {
   // Fix for the silent-empty-results bug class that motivated this whole release.
   const cfgPre = loadConfig();
   if (isThinClient(cfgPre)) {
-    if (op.localOnly) {
+    if (thinClientOperationDisposition(op) === 'refuse') {
       refuseThinClient(command, cfgPre!.remote_mcp!.mcp_url);
     }
     // A thin client has no local mounts — an explicit --brain cannot be

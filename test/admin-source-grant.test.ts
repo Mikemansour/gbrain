@@ -2,11 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import { normalizeAdminSourceGrant } from '../src/commands/serve-http.ts';
 
 describe('admin OAuth source grant normalization', () => {
-  test('preserves the legacy default-source behavior when omitted', () => {
+  test('preserves the legacy default-source behavior only when both fields are omitted', () => {
     expect(normalizeAdminSourceGrant(undefined, undefined)).toEqual({
       sourceId: 'default',
       federatedRead: undefined,
     });
+    expect(() => normalizeAdminSourceGrant(undefined, ['default']))
+      .toThrow(/explicit sourceId/);
   });
 
   test('accepts and deterministically normalizes a bounded source grant', () => {

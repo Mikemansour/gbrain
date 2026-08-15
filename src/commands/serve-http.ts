@@ -96,6 +96,9 @@ export function normalizeAdminSourceGrant(
   rawSourceId: unknown,
   rawFederatedRead: unknown,
 ): AdminSourceGrant {
+  if (rawSourceId === undefined && rawFederatedRead !== undefined) {
+    throw new Error('federatedRead requires an explicit sourceId');
+  }
   const sourceId = rawSourceId === undefined ? 'default' : rawSourceId;
   if (!isValidSourceId(sourceId)) {
     throw new Error('sourceId must be a valid registered source identifier');

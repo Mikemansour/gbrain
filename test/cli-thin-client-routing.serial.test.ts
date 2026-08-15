@@ -1,13 +1,12 @@
 /**
- * Migration C1: exhaustive thin-client façade classification plus empirical
- * proof for every admitted command.
+ * Thin-client routing proof for the production GBrain dispatch predicate and
+ * the four read routes selected by the separately reviewed Axiom façade.
  *
- * The reviewed façade admits `get`, `query`, `graph-query` (rewritten to
- * the shared `graph` command), and `whoami`. `doctor` remains outside because
- * its `admin` scope implies write. Every CLI_ONLY command, operation alias, manual alias, and unknown
- * root is denied before the real binary is launched. This test derives the
- * command inventory from source so a future CLI addition cannot silently
- * escape classification.
+ * GBrain itself routes every non-localOnly shared operation remotely and
+ * refuses every localOnly operation. The Axiom wrapper narrows that larger
+ * production surface to `get`, `query`, `graph-query` (rewritten to `graph`),
+ * and `whoami`; its own exhaustive allowlist/refusal tests live in
+ * axiom-infra. This file must not pretend that GBrain has the same allowlist.
  *
  * The admitted commands are also spawned against a hermetic loopback OAuth +
  * MCP fixture from a nested GBRAIN_HOME. Successful remote requests and a
@@ -39,72 +38,37 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { operations } from '../src/core/operations.ts';
+import { thinClientOperationDisposition } from '../src/cli.ts';
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
 const CLI_SOURCE = readFileSync(CLI, 'utf8');
-const ADMITTED = new Set(['get', 'query', 'graph', 'whoami']);
-const REMOTE_CAPABLE = new Set(['get', 'query', 'graph', 'whoami', 'doctor']);
-const MANUAL_ALIASES = new Set(['ask']);
-
-function literalSet(name: string): Set<string> {
-  const pattern = new RegExp(
-    `const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\);`,
-  );
-  const match = CLI_SOURCE.match(pattern);
-  if (!match) throw new Error(`could not find ${name} in src/cli.ts`);
-  return new Set(
-    [...match[1].matchAll(/'([^']+)'/g)].map(item => item[1]),
-  );
-}
-
-const CLI_ONLY = literalSet('CLI_ONLY');
-const OPERATION_ROOTS = new Set(
-  operations
-    .filter(op => op.cliHints?.name && !op.cliHints.hidden)
-    .map(op => op.cliHints!.name!),
-);
-const OPERATION_ALIASES = new Set(
-  operations
-    .filter(op => !op.cliHints?.hidden)
-    .flatMap(op => op.cliHints?.aliases ?? []),
-);
-
-function facadeDecision(root: string): 'remote' | 'refuse' {
-  return ADMITTED.has(root) ? 'remote' : 'refuse';
-}
-
-describe('C1 exhaustive façade classification', () => {
-  test('every CLI_ONLY root is covered and refused by the V1 façade', () => {
-    expect(CLI_ONLY.size).toBeGreaterThan(70);
-    for (const root of CLI_ONLY) {
-      expect(facadeDecision(root)).toBe('refuse');
-    }
-    expect(REMOTE_CAPABLE.has('doctor')).toBe(true);
-    expect(CLI_ONLY.has('graph-query')).toBe(true);
-    expect(facadeDecision('graph-query')).toBe('refuse');
-  });
-
-  test('every generated and manual alias defaults to refusal', () => {
-    expect(OPERATION_ALIASES.size).toBeGreaterThan(0);
-    for (const alias of [...OPERATION_ALIASES, ...MANUAL_ALIASES]) {
-      expect(facadeDecision(alias)).toBe('refuse');
+describe('production thin-client operation classification', () => {
+  test('classifies every shared operation through the predicate used by src/cli.ts', () => {
+    expect(operations.length).toBeGreaterThan(80);
+    for (const op of operations) {
+      expect(thinClientOperationDisposition(op)).toBe(
+        op.localOnly ? 'refuse' : 'remote',
+      );
     }
   });
 
-  test('shared operation inventory admits only the reviewed read façade', () => {
-    for (const admitted of ['get', 'query', 'graph', 'whoami']) {
-      expect(OPERATION_ROOTS.has(admitted)).toBe(true);
-    }
-    for (const root of OPERATION_ROOTS) {
-      expect(facadeDecision(root)).toBe(ADMITTED.has(root) ? 'remote' : 'refuse');
+  test('the four Axiom-selected read routes are remote-capable in GBrain', () => {
+    const byCliName = new Map(
+      operations
+        .filter(op => op.cliHints?.name)
+        .map(op => [op.cliHints!.name!, op]),
+    );
+    for (const root of ['get', 'query', 'graph', 'whoami']) {
+      const op = byCliName.get(root);
+      expect(op).toBeDefined();
+      expect(thinClientOperationDisposition(op!)).toBe('remote');
     }
   });
 
-  test('unknown future roots refuse by default', () => {
-    expect(facadeDecision('future-command-not-yet-reviewed')).toBe('refuse');
-  });
-
-  test('source ordering returns admitted routes before local connect', () => {
+  test('production dispatch evaluates the predicate before local connect', () => {
+    const predicateUse = CLI_SOURCE.indexOf(
+      'thinClientOperationDisposition(op)',
+    );
     const sharedThinRoute = CLI_SOURCE.indexOf(
       'await runThinClientRouted(op, params, cfgPre!, cliOpts);',
     );
@@ -112,20 +76,9 @@ describe('C1 exhaustive façade classification', () => {
       'const engine = await connectEngine();',
       sharedThinRoute,
     );
-    expect(sharedThinRoute).toBeGreaterThan(0);
+    expect(predicateUse).toBeGreaterThan(0);
+    expect(sharedThinRoute).toBeGreaterThan(predicateUse);
     expect(sharedLocalConnect).toBeGreaterThan(sharedThinRoute);
-
-    const doctorThinRoute = CLI_SOURCE.indexOf(
-      'await runRemoteDoctor(cfgForDoctor!, args);',
-    );
-    const remainingCliOnlyConnect = CLI_SOURCE.indexOf(
-      '// All remaining CLI-only commands need a DB connection',
-    );
-    expect(doctorThinRoute).toBeGreaterThan(0);
-    expect(remainingCliOnlyConnect).toBeGreaterThan(doctorThinRoute);
-
-    const graphDispatch = CLI_SOURCE.indexOf("case 'graph-query':");
-    expect(graphDispatch).toBeGreaterThan(remainingCliOnlyConnect);
   });
 });
 
