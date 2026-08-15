@@ -275,7 +275,7 @@ printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
     --reuid=0 --regid=0 --clear-groups \\
     env -u DATABASE_URL -u GBRAIN_DATABASE_URL HOME=/tmp/shard-home-\${shard} \\
     TMPDIR=/tmp/shard-tmp-\${shard} SHARD=\${shard}/4 \\
-    bash scripts/run-unit-shard.sh >> \$log 2>&1
+    bash scripts/run-unit-shard.sh >> \$log 2>> \$log
   unit_exit=\$?
   if [ \$unit_exit -ne 0 ]; then
     echo \"[shard \${shard}] UNIT FAILED (exit=\$unit_exit)\" >> \$log
@@ -287,13 +287,13 @@ printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
     DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
-    xargs -a /tmp/e2e-selected.txt bash scripts/run-e2e.sh >> \$log 2>&1
+    xargs -a /tmp/e2e-selected.txt bash scripts/run-e2e.sh >> \$log 2>> \$log
   else
     SHARD=\${shard}/4 \\
     DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
-    bash scripts/run-e2e.sh >> \$log 2>&1
+    bash scripts/run-e2e.sh >> \$log 2>> \$log
   fi
   e2e_exit=\$?
   if [ \$e2e_exit -ne 0 ]; then
@@ -352,6 +352,10 @@ __RUN_PHASES__
 EOF
 )
 INNER_CMD="${INNER_CMD/__RUN_PHASES__/$RUN_PHASES_CMD}"
+if [[ "$INNER_CMD" == *"__RUN_PHASES__"* ]]; then
+  echo "[ci-local] ERROR: runner command placeholder survived substitution" >&2
+  exit 1
+fi
 
 # Conductor / git-worktree support: when `.git` is a file (not a directory),
 # it points at a host gitdir outside the bind-mount. Without remounting that
