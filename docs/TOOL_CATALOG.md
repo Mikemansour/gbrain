@@ -140,12 +140,6 @@ Every non-localOnly operation on the MCP surface: 105 tools across 23 areas. **S
 | `ontology_get` | Life Chronicle: the current resolved per-entity ontology (dimension → value) at `asof` (default now), with provenance + confidence + validity. | read |  |  |
 | `ontology_propose` | Life Chronicle: record one ontology observation (entity has dimension=value), sourced + confidence-weighted + bi-temporal. | write |  |  |
 
-## other
-
-| Tool | Description | Scope | Starter | Gate |
-|---|---|---|---|---|
-| `run_dream_cycle` | Run the GBrain maintenance cycle inside the serving process. | admin |  |  |
-
 ## pages
 
 | Tool | Description | Scope | Starter | Gate |
@@ -200,6 +194,12 @@ Every non-localOnly operation on the MCP surface: 105 tools across 23 areas. **S
 | `sources_list` | List registered sources with page counts and remote_url. | read |  |  |
 | `sources_remove` | Hard-remove a source (cascades pages/chunks/embeddings). | sources_admin |  |  |
 | `sources_status` | Per-source diagnostic. | read |  |  |
+
+## sync
+
+| Tool | Description | Scope | Starter | Gate |
+|---|---|---|---|---|
+| `run_dream_cycle` | Run the GBrain maintenance cycle inside the serving process. | admin |  |  |
 
 ## tags
 

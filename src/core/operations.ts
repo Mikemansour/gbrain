@@ -7464,8 +7464,8 @@ const OP_AREAS: Record<string, string> = {
   // sources
   sources_add: 'sources', sources_list: 'sources', sources_remove: 'sources',
   sources_status: 'sources',
-  // sync (localOnly)
-  sync_brain: 'sync',
+  // sync (localOnly + safe remote maintenance)
+  sync_brain: 'sync', run_dream_cycle: 'sync',
   // ingest log
   log_ingest: 'ingest', get_ingest_log: 'ingest',
   // files (localOnly)
