@@ -222,27 +222,6 @@ describe('hasScope — read-only token cannot satisfy write or admin scopes', ()
   });
 });
 
-describe('run_dream_cycle — safe remote maintenance surface', () => {
-  test('is HTTP-exposed, admin-scoped, and accepts no caller-controlled repo path', () => {
-    const op = operations.find(candidate => candidate.name === 'run_dream_cycle');
-
-    expect(op).toBeDefined();
-    expect(op!.localOnly).not.toBe(true);
-    expect(op!.mutating).toBe(true);
-    expect(op!.scope).toBe('admin');
-    expect(op!.params.repo).toBeUndefined();
-  });
-
-  test('rejects unknown phase names before running the cycle', async () => {
-    const op = operations.find(candidate => candidate.name === 'run_dream_cycle');
-    expect(op).toBeDefined();
-
-    await expect(
-      op!.handler(makeContext(), { phases: ['not-a-real-phase'] }),
-    ).rejects.toThrow(/invalid.*phase|unknown.*phase/i);
-  });
-});
-
 describe('handler invocation — historically-broken trust-boundary classes', () => {
   // The two non-localOnly ops whose handler-level defense fires in
   // production and has been broken historically (F7b HTTP MCP shell-job
