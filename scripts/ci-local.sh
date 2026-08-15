@@ -364,15 +364,9 @@ fi
 # shared common gitdir and bind-mount them at the same absolute paths.
 EXTRA_MOUNTS=()
 if [ -f .git ]; then
-  WORKTREE_GITDIR=$(awk '{print $2}' .git)
+  WORKTREE_GITDIR=$(git rev-parse --absolute-git-dir)
   if [ -d "$WORKTREE_GITDIR" ]; then
-    COMMONDIR_FILE="$WORKTREE_GITDIR/commondir"
-    if [ -f "$COMMONDIR_FILE" ]; then
-      COMMON_REL=$(cat "$COMMONDIR_FILE")
-      COMMON_GITDIR=$(cd "$WORKTREE_GITDIR" && cd "$COMMON_REL" && pwd)
-    else
-      COMMON_GITDIR="$WORKTREE_GITDIR"
-    fi
+    COMMON_GITDIR=$(git rev-parse --path-format=absolute --git-common-dir)
     # Mount the higher-level common gitdir and the worktree at its original
     # absolute path. The worktree admin dir's `gitdir` file points back to that
     # host path, so mounting only the common gitdir leaves Git's round-trip

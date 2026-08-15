@@ -73,7 +73,7 @@ describe('v0.36.1.x #1077 — admin register-client supports PKCE public clients
     // via `?? `, so this regex no longer requires `scopes` in the inline
     // destructure — it's separately covered by the scope-source check
     // below.
-    expect(src).toMatch(/const\s+\{\s*name,\s*(?:[^}]*?,\s*)?tokenTtl,\s*grantTypes,\s*redirectUris,\s*tokenEndpointAuthMethod,\s*sourceId,\s*federatedRead,\s*\}\s*=\s*req\.body/);
+    expect(src).toMatch(/const\s+\{\s*name,\s*(?:[^}]*?,\s*)?tokenTtl,\s*grantTypes,\s*redirectUris,\s*tokenEndpointAuthMethod,\s*sourceId:\s*requestedSourceId,\s*federatedRead,\s*\}\s*=\s*req\.body/);
     // v0.39.3.0 WARN-9: the route must still read a `scope`/`scopes` field
     // (under either name) from req.body. Pin the fallback pattern so the
     // PKCE-fix regression contract stays load-bearing.
@@ -300,5 +300,14 @@ describe('v0.42.43.0 #2095 — volunteer-events sink + cycle purge wiring (struc
     const src = readFileSync('src/core/cycle.ts', 'utf8');
     expect(src).toMatch(/purgeStaleVolunteerEvents\(engine\)/);
     expect(src).toMatch(/purged_volunteer_events_count/);
+  });
+});
+
+describe('local CI linked-worktree discovery', () => {
+  test('uses Git path resolution without whitespace-splitting .git backpointers', () => {
+    const src = readFileSync('scripts/ci-local.sh', 'utf8');
+    expect(src).not.toMatch(/awk\s+['"]\{print \$2\}['"]\s+\.git/);
+    expect(src).toContain('git rev-parse --absolute-git-dir');
+    expect(src).toContain('git rev-parse --path-format=absolute --git-common-dir');
   });
 });

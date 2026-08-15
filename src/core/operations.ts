@@ -2651,7 +2651,14 @@ const get_tags: Operation = {
  * never cleans (see src/schema.sql). `manual` is intentionally absent — it IS
  * the user-facing provenance and the default for omitted link_source.
  */
-export const MANAGED_LINK_SOURCES = ['markdown', 'frontmatter', 'mentions', 'wikilink-resolved'];
+const AXIOM_GRAPH_LINK_SOURCE = 'axiom-managed-v1';
+export const MANAGED_LINK_SOURCES = [
+  'markdown',
+  'frontmatter',
+  'mentions',
+  'wikilink-resolved',
+  AXIOM_GRAPH_LINK_SOURCE,
+];
 
 const add_link: Operation = {
   name: 'add_link',
@@ -2776,7 +2783,6 @@ const list_link_sources: Operation = {
 
 const AXIOM_GRAPH_CLIENT_NAME = 'polaris-axiom-sync';
 const AXIOM_GRAPH_SOURCE_ID = 'axiom-polaris';
-const AXIOM_GRAPH_LINK_SOURCE = 'axiom-managed-v1';
 const AXIOM_GRAPH_CONTEXT_PREFIX = `${AXIOM_GRAPH_LINK_SOURCE}:`;
 const AXIOM_GRAPH_PAGE_MARKER = 'polaris-v1';
 const AXIOM_GRAPH_MAX_BYTES = 1024 * 1024;
@@ -3119,9 +3125,8 @@ async function listAxiomManagedLinks(engine: BrainEngine): Promise<AxiomManagedL
       JOIN pages t ON t.id = l.to_page_id
        LEFT JOIN pages o ON o.id = l.origin_page_id
       WHERE l.link_source = $1
-        AND (f.source_id = $2 OR t.source_id = $2 OR o.source_id = $2)
       ORDER BY f.slug, t.slug, l.link_type`,
-    [AXIOM_GRAPH_LINK_SOURCE, AXIOM_GRAPH_SOURCE_ID],
+    [AXIOM_GRAPH_LINK_SOURCE],
   );
 }
 

@@ -142,6 +142,46 @@ describe('reconcile_axiom_graph', () => {
     expect(await engine.getPage('axiom-one', { sourceId: SOURCE_ID })).toBeNull();
   });
 
+  test('reserves axiom-managed provenance from ordinary add_link callers', async () => {
+    await expect(operationsByName.add_link.handler(context(), {
+      from: 'axiom-one',
+      to: 'axiom-two',
+      link_type: 'depends-on',
+      link_source: LINK_SOURCE,
+    })).rejects.toThrow(/reconciliation-managed/);
+  });
+
+  test('rejects foreign-only rows carrying axiom-managed provenance', async () => {
+    const foreignSource = 'neighbor-source';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES ($1, $1, '{}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+      [foreignSource],
+    );
+    for (const slug of ['foreign-one', 'foreign-two']) {
+      await engine.putPage(slug, {
+        type: 'note',
+        title: slug,
+        compiled_truth: `# ${slug}`,
+        frontmatter: {},
+      }, { sourceId: foreignSource });
+    }
+    await engine.addLink(
+      'foreign-one',
+      'foreign-two',
+      'forged provenance',
+      'depends-on',
+      LINK_SOURCE,
+      undefined,
+      undefined,
+      { fromSourceId: foreignSource, toSourceId: foreignSource },
+    );
+
+    await expect(invoke(graph)).rejects.toThrow(/crosses the dedicated source boundary/);
+    expect(await engine.getPage('axiom-one', { sourceId: SOURCE_ID })).toBeNull();
+  });
+
   test('strictly rejects unknown fields and non-loopback health metadata', async () => {
     await expect(invoke({ ...graph, extra: true })).rejects.toThrow(
       /unsupported fields/,
