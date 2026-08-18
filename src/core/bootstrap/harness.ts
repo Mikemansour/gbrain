@@ -297,7 +297,10 @@ function resolveDeps(deps: HarnessDeps): Required<Omit<HarnessDeps, 'gbrainBin'>
 
 function whichSafe(bin: string): string | null {
   try {
-    return Bun.which(bin);
+    // Bun caches the process-start PATH when no override is supplied. Honor
+    // the current environment so callers that intentionally sandbox PATH
+    // detect the binaries actually available to the operation.
+    return Bun.which(bin, { PATH: process.env.PATH });
   } catch {
     return null;
   }

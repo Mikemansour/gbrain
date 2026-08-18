@@ -207,10 +207,12 @@ SELECTED=$(bun run scripts/select-e2e.ts)
 if [ -z "$SELECTED" ]; then
   echo "[runner] selector emitted nothing (doc-only diff); skipping E2E."
 else
-  DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
-  GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \
-  GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
-  echo "$SELECTED" | xargs bash scripts/run-e2e.sh
+  echo "$SELECTED" | env \
+    GBRAIN_TEST_DB=1 \
+    DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
+    GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \
+    GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
+    xargs bash scripts/run-e2e.sh
 fi'
   else
     RUN_PHASES_CMD='echo "[runner] guards + typecheck"
@@ -222,6 +224,7 @@ bun run typecheck
 echo "[runner] unit (unsharded, DATABASE_URL unset)"
 env -u DATABASE_URL bash scripts/run-unit-shard.sh
 echo "[runner] e2e (unsharded)"
+GBRAIN_TEST_DB=1 \
 DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
 GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \
 GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
@@ -293,6 +296,7 @@ printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
     --inh-caps=-dac_override,-dac_read_search \
     --ambient-caps=-dac_override,-dac_read_search \
     env SHARD=\${shard}/4 \\
+    GBRAIN_TEST_DB=1 \\
     DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
@@ -302,6 +306,7 @@ printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
     --inh-caps=-dac_override,-dac_read_search \
     --ambient-caps=-dac_override,-dac_read_search \
     env SHARD=\${shard}/4 \\
+    GBRAIN_TEST_DB=1 \\
     DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\

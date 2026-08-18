@@ -5,6 +5,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { assertSafeE2eDatabaseUrl } from './helpers.ts';
+import { isSchemaDriftResetAllowed } from '../helpers/db-guard.ts';
 
 const NO_ENV = {} as Record<string, string | undefined>;
 
@@ -61,5 +62,45 @@ describe('assertSafeE2eDatabaseUrl', () => {
     expect(() => assertSafeE2eDatabaseUrl('postgresql://u:p@localhost:5432/', NO_ENV)).toThrow(
       /no database name/,
     );
+  });
+});
+
+describe('isSchemaDriftResetAllowed', () => {
+  test('allows test-shaped databases on local hosts without an override', () => {
+    for (const host of ['localhost', '127.0.0.1', 'postgres.local']) {
+      expect(
+        isSchemaDriftResetAllowed(`postgresql://u:p@${host}:5432/gbrain_test`, NO_ENV),
+      ).toBe(true);
+    }
+  });
+
+  test('allows only the exact ci-local host/database topology with the CI opt-in', () => {
+    for (const host of ['postgres-1', 'postgres-2', 'postgres-3', 'postgres-4']) {
+      expect(
+        isSchemaDriftResetAllowed(`postgresql://u:p@${host}:5432/gbrain_test`, {
+          GBRAIN_TEST_DB: '1',
+        }),
+      ).toBe(true);
+    }
+  });
+
+  test('refuses arbitrary non-local test databases even with the CI opt-in', () => {
+    for (const url of [
+      'postgresql://u:p@postgres:5432/gbrain_test',
+      'postgresql://u:p@db.internal:5432/customer_test',
+      'postgresql://u:p@postgres-1:5432/customer_test',
+      'postgresql://u:p@postgres-5:5432/gbrain_test',
+    ]) {
+      expect(isSchemaDriftResetAllowed(url, { GBRAIN_TEST_DB: '1' })).toBe(false);
+    }
+  });
+
+  test('refuses production-looking database names on every host', () => {
+    for (const url of [
+      'postgresql://u:p@localhost:5432/production',
+      'postgresql://u:p@postgres-1:5432/production',
+    ]) {
+      expect(isSchemaDriftResetAllowed(url, { GBRAIN_TEST_DB: '1' })).toBe(false);
+    }
   });
 });
