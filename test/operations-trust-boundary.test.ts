@@ -37,6 +37,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
+import { ALL_PHASES } from '../src/core/cycle.ts';
 import { hasScope } from '../src/core/scope.ts';
 
 let engine: PGLiteEngine;
@@ -349,6 +350,29 @@ describe('run_dream_cycle — safe remote maintenance surface', () => {
     }), { phases: ['orphans'], dry_run: true }) as { brain_dir: string | null };
 
     expect(report.brain_dir).toBe('/tmp/gbrain-authorized-source');
+  });
+
+  test('omitted phases run the full protected-maintenance cycle for a sole non-default source', async () => {
+    const op = operations.find(candidate => candidate.name === 'run_dream_cycle');
+    expect(op).toBeDefined();
+
+    const sourceId = 'axiom-polaris';
+    await engine.executeRaw(
+      `UPDATE sources SET id = $1, name = $2, local_path = $3 WHERE id = $4`,
+      [sourceId, 'Axiom Polaris', '/tmp/gbrain-authorized-source', 'default'],
+    );
+
+    const report = await op!.handler(makeContext({
+      transport: 'http',
+      sourceId,
+      auth: {
+        ...authorizedCycleAuth,
+        sourceId,
+        allowedSources: [sourceId],
+      },
+    }), { dry_run: true }) as { phases: Array<{ phase: string }> };
+
+    expect(report.phases.map(({ phase }) => phase)).toEqual(ALL_PHASES);
   });
 });
 

@@ -136,7 +136,7 @@ const run_dream_cycle: Operation = {
     return runCycle(ctx.engine, {
       brainDir,
       dryRun: ctx.dryRun || (p.dry_run as boolean) || false,
-      phases,
+      phases: phases ?? ALL_PHASES,
       pull: false,
       sourceId,
       yieldBetweenPhases: yieldToLoop,
