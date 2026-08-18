@@ -53,6 +53,7 @@ import { writeSurfaceChangeAudit } from '../core/surface-audit.ts';
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { loadConfig } from '../core/config.ts';
 import { buildError, serializeError } from '../core/errors.ts';
+import { loadReleaseIdentity, type GBrainReleaseIdentity } from '../core/release-identity.ts';
 import { VERSION } from '../version.ts';
 import * as db from '../core/db.ts';
 import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
@@ -341,18 +342,16 @@ export async function probeHealth(
 
 /**
  * Lightweight liveness probe. Races `SELECT 1` against the same timeout
- * `probeHealth` uses, returns the same tagged-union result type, but the
- * 200 body is intentionally bare: `{status, version, engine}` — no engine
- * stats. Stats moved to `/admin/api/full-stats` (admin auth) in v0.28.10
- * because `getStats()`'s six count(*) queries exceeded HEALTH_TIMEOUT_MS
- * on production brains through PgBouncer, producing false 503s that
- * triggered orchestrator restart cascades and advisory-lock pile-ups.
+ * `probeHealth` uses and returns a bare `{status, version, engine}` body plus
+ * optional sealed-release identity — never engine stats. Stats moved to
+ * `/admin/api/full-stats` because their count queries caused false 503s.
  */
 export async function probeLiveness(
   sql: SqlQuery,
   engineName: string,
   version: string,
   timeoutMs: number = HEALTH_TIMEOUT_MS,
+  releaseIdentity: GBrainReleaseIdentity | null = null,
 ): Promise<ProbeHealthResult> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   try {
@@ -365,7 +364,7 @@ export async function probeLiveness(
     return {
       ok: true,
       status: 200,
-      body: { status: 'ok', version, engine: engineName },
+      body: { status: 'ok', version, engine: engineName, ...(releaseIdentity ?? {}) },
     };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'unknown';
@@ -650,6 +649,7 @@ export async function embeddingWidthStartupWarning(engine: BrainEngine): Promise
 
 export async function runServeHttp(engine: BrainEngine, options: ServeHttpOptions) {
   const { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams } = options;
+  const releaseIdentity = loadReleaseIdentity();
   // v0.34.1 (#864, D11): default bind flipped from 0.0.0.0 to 127.0.0.1.
   // gbrain's primary use case is a personal-knowledge brain on a laptop;
   // the pre-v0.34 default exposed brains on every interface. Server
@@ -1194,7 +1194,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // /admin/api/full-stats (requireAdmin). See probeLiveness above for the why.
   // ---------------------------------------------------------------------------
   app.get('/health', async (_req, res) => {
-    const result = await probeLiveness(sql, config.engine || 'pglite', VERSION);
+    const result = await probeLiveness(sql, config.engine || 'pglite', VERSION, HEALTH_TIMEOUT_MS, releaseIdentity);
     res.status(result.status).json(result.body);
   });
 
