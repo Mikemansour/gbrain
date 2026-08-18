@@ -26,4 +26,12 @@ describe('ci-local shard harness hardening', () => {
     expect(ciLocalSource).toContain(':/evidence');
     expect(ciLocalSource).toContain('log=/evidence/shard-\\${shard}.log');
   });
+
+  test('runs process-isolated serial tests once before the four parallel shards', () => {
+    const serialLane = ciLocalSource.indexOf('bash scripts/run-serial-tests.sh');
+    const shardFanout = ciLocalSource.indexOf('xargs -P4 -I{}');
+    expect(serialLane).toBeGreaterThan(-1);
+    expect(shardFanout).toBeGreaterThan(serialLane);
+    expect(ciLocalSource).toContain('serial_root=/tmp/gbrain-ci-serial');
+  });
 });
