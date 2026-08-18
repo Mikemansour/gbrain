@@ -343,11 +343,17 @@ fi
 INNER_CMD=$(cat <<'EOF'
 set -euo pipefail
 echo "[runner] bun version: $(bun --version)"
-# oven/bun:1 omits git; many unit tests use mkdtemp + git init for fixtures.
-if ! command -v git >/dev/null 2>&1; then
-  echo "[runner] Installing git (debian apt)..."
+# oven/bun:1 omits the host utilities exercised by several integration-shaped
+# unit tests. Install the complete lane contract together so a partially
+# populated image cannot silently skip PID, scheduler, or security-scan paths.
+if ! command -v git >/dev/null 2>&1 || \
+   ! command -v python3 >/dev/null 2>&1 || \
+   ! command -v ps >/dev/null 2>&1 || \
+   ! command -v crontab >/dev/null 2>&1; then
+  echo "[runner] Installing CI host utilities (git, python3, procps, cron)..."
   apt-get update -qq >/dev/null
-  apt-get install -y -qq git ca-certificates >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    git ca-certificates python3 procps cron >/dev/null
 fi
 # Container runs as root (uid 0) against a host-uid bind-mount; mark repo +
 # any worktree gitdir as safe so `git status` etc. don't refuse.

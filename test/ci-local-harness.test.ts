@@ -34,4 +34,11 @@ describe('ci-local shard harness hardening', () => {
     expect(shardFanout).toBeGreaterThan(serialLane);
     expect(ciLocalSource).toContain('serial_root=/tmp/gbrain-ci-serial');
   });
+
+  test('installs every host utility exercised by the containerized serial lane', () => {
+    expect(ciLocalSource).toContain('git ca-certificates python3 procps cron');
+    expect(ciLocalSource).toContain('command -v python3');
+    expect(ciLocalSource).toContain('command -v ps');
+    expect(ciLocalSource).toContain('command -v crontab');
+  });
 });
