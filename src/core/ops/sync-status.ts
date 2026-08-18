@@ -80,7 +80,7 @@ const sync_brain: Operation = {
 const run_dream_cycle: Operation = {
   name: 'run_dream_cycle',
   description:
-    'Run the GBrain maintenance cycle inside the serving process. Restricted to the deployment\'s dedicated protected-maintenance OAuth client and its exact single-source local_path.',
+    'Run the GBrain maintenance cycle inside the serving process. Restricted to the deployment\'s dedicated protected-maintenance OAuth client on an exact single-source PGLite brain.',
   params: {
     phases: {
       type: 'array',
@@ -94,6 +94,12 @@ const run_dream_cycle: Operation = {
   area: 'sync',
   handler: async (ctx, p) => {
     const sourceId = assertProtectedCycleCaller(ctx);
+    if (ctx.engine.kind !== 'pglite') {
+      throw new OperationError(
+        'permission_denied',
+        'run_dream_cycle is available only on a single-owner PGLite brain.',
+      );
+    }
     const { ALL_PHASES, runCycle } = await import('../cycle.ts');
     const requested = p.phases as unknown;
     let phases: (typeof ALL_PHASES)[number][] | undefined;
@@ -112,12 +118,16 @@ const run_dream_cycle: Operation = {
       phases = requested as (typeof ALL_PHASES)[number][];
     }
 
-    const source = (await ctx.engine.listAllSources({ localPathOnly: true }))
-      .find(candidate => candidate.id === sourceId);
-    if (!source?.local_path) {
+    const activeSources = await ctx.engine.listAllSources();
+    const source = activeSources[0];
+    if (
+      activeSources.length !== 1
+      || source?.id !== sourceId
+      || !source.local_path
+    ) {
       throw new OperationError(
         'permission_denied',
-        `The protected maintenance source "${sourceId}" has no active local_path on this host.`,
+        `run_dream_cycle requires a single-source brain whose active source exactly matches "${sourceId}" and has a local_path.`,
       );
     }
     const brainDir = source.local_path;
