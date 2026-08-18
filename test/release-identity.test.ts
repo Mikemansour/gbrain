@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -58,9 +60,20 @@ function makeRelease(): { root: string; executable: string; manifest: string } {
   return { root, executable, manifest };
 }
 
+function makeTreeRemovable(path: string): void {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+  chmodSync(path, 0o700);
+  for (const entry of readdirSync(path)) {
+    makeTreeRemovable(join(path, entry));
+  }
+}
+
 afterEach(() => {
   while (roots.length > 0) {
-    rmSync(roots.pop()!, { recursive: true, force: true });
+    const root = roots.pop()!;
+    makeTreeRemovable(root);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
