@@ -42,7 +42,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { runHook, readHeartbeatTail } from '../../src/commands/hook.ts';
+import { HEARTBEAT_MAX_LINES, runHook, readHeartbeatTail } from '../../src/commands/hook.ts';
 import { resolveSocketPath, ipcSecretPath } from '../../src/core/context/resolve-ipc.ts';
 import { LiveServeLockError } from '../../src/core/pglite-lock.ts';
 import { createEngine } from '../../src/core/engine-factory.ts';
@@ -90,6 +90,20 @@ const serveStderr: string[] = [];
 function collectStdout(): { write: (s: string) => void; get: () => string } {
   let buf = '';
   return { write: (s: string) => { buf += s; }, get: () => buf };
+}
+
+async function heartbeatCount(): Promise<number> {
+  return (await readHeartbeatTail(HEARTBEAT_MAX_LINES)).length;
+}
+
+async function heartbeatSince(
+  beforeCount: number,
+  event: string,
+): Promise<Awaited<ReturnType<typeof readHeartbeatTail>>[number] | undefined> {
+  return (await readHeartbeatTail(HEARTBEAT_MAX_LINES))
+    .slice(beforeCount)
+    .filter((entry) => entry.event === event)
+    .at(-1);
 }
 
 async function pollFor(pred: () => boolean, deadlineMs: number, label: string): Promise<void> {
@@ -351,6 +365,7 @@ describe('bootstrap hook under a live serve (serial e2e) [A7]', () => {
     // session_context_state ('workspace', 'local', session id). PreCompact
     // stdout is not context-injected — the WRITE is the whole point.
     const bankOut = collectStdout();
+    const heartbeatBeforeBank = await heartbeatCount();
     const bankCode = await runHook(['compact'], {
       stdin: JSON.stringify({ transcript_path: transcript, session_id: 'e2e-pack-sess' }),
       write: bankOut.write,
@@ -359,10 +374,10 @@ describe('bootstrap hook under a live serve (serial e2e) [A7]', () => {
     });
     expect(bankCode).toBe(0);
     expect(bankOut.get()).toBe(''); // PreCompact emits nothing
-    const [bankHb] = await readHeartbeatTail(1);
+    const bankHb = await heartbeatSince(heartbeatBeforeBank, 'compact');
     expect(bankHb).toBeDefined();
-    expect(bankHb.event).toBe('compact');
-    expect(bankHb.outcome).toBe('ok'); // a degradation here means banking never reached the serve
+    expect(bankHb!.event).toBe('compact');
+    expect(bankHb!.outcome).toBe('ok'); // a degradation here means banking never reached the serve
 
     // 3b — post-compaction SessionStart (source=compact): the SAME session id
     // pulls the banked standing set back through the real
@@ -372,6 +387,7 @@ describe('bootstrap hook under a live serve (serial e2e) [A7]', () => {
     // table by design (Pin 2: the serve holds the PGLite lock), so the stdout
     // content IS the proof the session_context_state round trip worked.
     const packOut = collectStdout();
+    const heartbeatBeforePack = await heartbeatCount();
     const packCode = await runHook(['session-start'], {
       stdin: JSON.stringify({ session_id: 'e2e-pack-sess', source: 'compact' }),
       write: packOut.write,
@@ -381,10 +397,10 @@ describe('bootstrap hook under a live serve (serial e2e) [A7]', () => {
     const pack = packOut.get();
     expect(pack).toContain('Alice Example');
     expect(pack).toContain('people/alice-example');
-    const [packHb] = await readHeartbeatTail(1);
+    const packHb = await heartbeatSince(heartbeatBeforePack, 'session-start');
     expect(packHb).toBeDefined();
-    expect(packHb.event).toBe('session-start');
-    expect(packHb.outcome).not.toBe('error');
+    expect(packHb!.event).toBe('session-start');
+    expect(packHb!.outcome).not.toBe('error');
 
     // The pack path never widens visibility (world-only ALWAYS, D2=A): no
     // fragment of a seeded PRIVATE belief may ride along in the warm pack.
@@ -411,6 +427,7 @@ describe('bootstrap hook under a live serve (serial e2e) [A7]', () => {
       ].join('\n') + '\n',
     );
     const out = collectStdout();
+    const heartbeatBeforeCompact = await heartbeatCount();
     const code = await runHook(['compact'], {
       stdin: JSON.stringify({ transcript_path: transcript, session_id: 'e2e-seg-sess' }),
       write: out.write,
@@ -419,10 +436,11 @@ describe('bootstrap hook under a live serve (serial e2e) [A7]', () => {
     });
     expect(code).toBe(0);
     expect(out.get()).toBe('');
-    const [hb] = await readHeartbeatTail(1);
-    expect(hb.event).toBe('compact');
-    expect(hb.outcome).toBe('ok'); // IPC round trip reached the serve
-    expect(hb.segment).toBe('segment_banked');
+    const hb = await heartbeatSince(heartbeatBeforeCompact, 'compact');
+    expect(hb).toBeDefined();
+    expect(hb!.event).toBe('compact');
+    expect(hb!.outcome).toBe('ok'); // IPC round trip reached the serve
+    expect(hb!.segment).toBe('segment_banked');
     // Durability artifacts on disk, content-addressed, since-boundary only.
     const corpusDir = join(tmpParent, '.gbrain', 'transcripts', 'corpus');
     const segs = readdirSync(corpusDir).filter((f) => f.startsWith('e2e-seg-sess.seg-') && f.endsWith('.txt'));
