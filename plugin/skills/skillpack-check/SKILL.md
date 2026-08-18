@@ -43,8 +43,11 @@ Exit code:
 - **Daily cron** (e.g. your OpenClaw's `morning-briefing`): `gbrain skillpack-check --quiet`.
   Exit code alone tells you if anything is wrong; surface a one-liner in the
   briefing only when exit != 0. No JSON noise in happy-path briefings.
-- **On demand**: `gbrain skillpack-check` for the full JSON when debugging.
-- **In a CI pipeline**: same pattern — exit code gates, JSON is the evidence.
+- **On demand**: `gbrain skillpack check` for an informational JSON report, or
+  the backward-compatible `gbrain skillpack-check` form when you want drift to
+  produce exit code 1.
+- **In a CI pipeline**: use `gbrain skillpack check --strict`; JSON is the
+  evidence and detected action-needed drift exits 1.
 
 ## What to do with the output
 
@@ -54,13 +57,16 @@ Surface the summary in the agent's output only if asked. Nothing else.
 
 ### Action needed (`healthy: false`)
 
-The `actions[]` array contains the commands to run, in order. Execute them:
+The `actions[]` array contains the commands to run, in order. Review the list,
+then execute each approved command individually:
 
 ```bash
-for cmd in $(echo "$REPORT" | jq -r '.actions[]'); do
-  eval "$cmd"
-done
+printf '%s\n' "$REPORT" | jq -r '.actions[]'
 ```
+
+Do not use word-splitting loops or blindly `eval` the array: remediation
+commands can contain spaces or shell metacharacters, and some entries require
+agent judgment rather than execution.
 
 Common `actions[]` entries and what they mean:
 
