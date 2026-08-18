@@ -24,6 +24,13 @@ cd "$(dirname "$0")/.."
 
 COMPOSE_FILE="docker-compose.ci.yml"
 
+# Complete shard logs are release evidence, not disposable container state.
+# Keep them outside the worktree so an exact-revision run stays clean.
+EVIDENCE_DIR="${GBRAIN_CI_EVIDENCE_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/gbrain-ci-evidence.XXXXXX")}"
+mkdir -p "$EVIDENCE_DIR"
+EVIDENCE_DIR=$(cd "$EVIDENCE_DIR" && pwd)
+echo "[ci-local] Evidence directory: $EVIDENCE_DIR"
+
 DIFF=0
 NO_PULL=0
 CLEAN=0
@@ -249,15 +256,22 @@ bun run build:pglite-snapshot
 export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
 echo \"[runner] resolving E2E file selection (--diff aware)\"
 ${DIFF_E2E_PREP}
-mkdir -p /tmp/shard-logs
 echo \"[runner] Tier 1: 4-shard parallel unit + E2E (xargs -P4)\"
 set +e
 printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
   shard=\$1
-  log=/tmp/shard-logs/shard-\${shard}.log
+  shard_root=/tmp/gbrain-ci-shard-\${shard}
+  rm -rf \$shard_root
+  mkdir -p \$shard_root/home \$shard_root/tmp
+  export HOME=\${shard_root}/home
+  export TMPDIR=\${shard_root}/tmp
+  log=/evidence/shard-\${shard}.log
   echo \"[shard \${shard}] start\" > \$log
   echo \"[shard \${shard}] unit phase (SHARD=\${shard}/4, DATABASE_URL unset)\" >> \$log
-  env -u DATABASE_URL SHARD=\${shard}/4 bash scripts/run-unit-shard.sh >> \$log 2>&1
+  setpriv --bounding-set=-dac_override,-dac_read_search \
+    --inh-caps=-dac_override,-dac_read_search \
+    --ambient-caps=-dac_override,-dac_read_search \
+    env -u DATABASE_URL SHARD=\${shard}/4 bash scripts/run-unit-shard.sh >> \$log 2>&1
   unit_exit=\$?
   if [ \$unit_exit -ne 0 ]; then
     echo \"[shard \${shard}] UNIT FAILED (exit=\$unit_exit)\" >> \$log
@@ -265,13 +279,19 @@ printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
   fi
   echo \"[shard \${shard}] e2e phase (SHARD=\${shard}/4, DATABASE_URL=postgres-\${shard})\" >> \$log
   if [ -s /tmp/e2e-selected.txt ]; then
-    SHARD=\${shard}/4 \\
+    setpriv --bounding-set=-dac_override,-dac_read_search \
+    --inh-caps=-dac_override,-dac_read_search \
+    --ambient-caps=-dac_override,-dac_read_search \
+    env SHARD=\${shard}/4 \\
     DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
     xargs -a /tmp/e2e-selected.txt bash scripts/run-e2e.sh >> \$log 2>&1
   else
-    SHARD=\${shard}/4 \\
+    setpriv --bounding-set=-dac_override,-dac_read_search \
+    --inh-caps=-dac_override,-dac_read_search \
+    --ambient-caps=-dac_override,-dac_read_search \
+    env SHARD=\${shard}/4 \\
     DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
@@ -291,13 +311,13 @@ echo \"=== SHARD LOGS (last 30 lines each + unit/e2e summaries) ===\"
 for s in 1 2 3 4; do
   echo \"\"
   echo \"--- shard \$s ---\"
-  if [ -f /tmp/shard-logs/shard-\$s.log ]; then
+  if [ -f /evidence/shard-\$s.log ]; then
     # Pull the unit + E2E summary lines explicitly so they survive even if
     # the file is huge. Match: bun's '<N> pass / <N> fail' pairs, run-e2e.sh's
     # 'Files: ... / Tests: ...' summary, and our own shard markers.
-    grep -E '^\\[shard|^Files: |^Tests: |Ran [0-9]+ tests|^[[:space:]]+[0-9]+ (pass|fail|skip)\$' /tmp/shard-logs/shard-\$s.log || true
+    grep -E '^\\[shard|^Files: |^Tests: |Ran [0-9]+ tests|^[[:space:]]+[0-9]+ (pass|fail|skip)\$' /evidence/shard-\$s.log || true
     echo \"  (last 30 lines for context)\"
-    tail -30 /tmp/shard-logs/shard-\$s.log
+    tail -30 /evidence/shard-\$s.log
   else
     echo \"(no log file written — shard never started)\"
   fi
@@ -329,7 +349,13 @@ fi
 __RUN_PHASES__
 EOF
 )
-INNER_CMD="${INNER_CMD/__RUN_PHASES__/$RUN_PHASES_CMD}"
+# Do not use `${var/pattern/replacement}` here: Bash replacement semantics
+# treat `&` in RUN_PHASES_CMD (for example `2>&1`) as the matched placeholder,
+# which previously created a repo-root `__RUN_PHASES__1` artifact and corrupted
+# the command. Prefix/suffix concatenation preserves the payload byte-for-byte.
+RUN_PHASES_PREFIX=${INNER_CMD%%__RUN_PHASES__*}
+RUN_PHASES_SUFFIX=${INNER_CMD#*__RUN_PHASES__}
+INNER_CMD="${RUN_PHASES_PREFIX}${RUN_PHASES_CMD}${RUN_PHASES_SUFFIX}"
 
 # Conductor / git-worktree support: when `.git` is a file (not a directory),
 # it points at a host gitdir outside the bind-mount. Without remounting that
@@ -354,7 +380,9 @@ if [ -f .git ]; then
 fi
 
 echo "[ci-local] Running checks inside runner container..."
-docker compose -f "$COMPOSE_FILE" run --rm "${EXTRA_MOUNTS[@]}" runner bash -c "$INNER_CMD"
+docker compose -f "$COMPOSE_FILE" run --rm \
+  -v "$EVIDENCE_DIR:/evidence" \
+  "${EXTRA_MOUNTS[@]}" runner bash -c "$INNER_CMD"
 
 echo ""
 echo "[ci-local] All checks passed."
