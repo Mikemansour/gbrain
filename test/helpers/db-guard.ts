@@ -39,3 +39,36 @@ export function assertSafeE2eDatabaseUrl(
     `GBRAIN_E2E_ALLOW_DB=${dbName} to opt in explicitly.`,
   );
 }
+
+/**
+ * Narrow reset guard for schema-drift.test.ts.
+ *
+ * Local test databases retain the developer workflow. Non-local reset is
+ * allowed only for ci-local's exact Docker topology; an ambient
+ * GBRAIN_TEST_DB=1 must not authorize arbitrary reachable *_test databases.
+ */
+export function isSchemaDriftResetAllowed(
+  url: string,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  const dbName = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+  const host = parsed.hostname;
+  const looksLikeTestDb = /^(gbrain_test|.*_test|test_.*|.*_e2e)$/i.test(dbName);
+  if (!looksLikeTestDb) return false;
+
+  const isLocalhost = host === 'localhost' || host === '127.0.0.1' || host.endsWith('.local');
+  if (isLocalhost) return true;
+
+  return (
+    env.GBRAIN_TEST_DB === '1' &&
+    dbName === 'gbrain_test' &&
+    /^postgres-[1-4]$/.test(host)
+  );
+}

@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const ciLocalSource = readFileSync(resolve(import.meta.dir, '../scripts/ci-local.sh'), 'utf8');
+const runE2eSource = readFileSync(resolve(import.meta.dir, '../scripts/run-e2e.sh'), 'utf8');
+const schemaDriftSource = readFileSync(resolve(import.meta.dir, 'e2e/schema-drift.test.ts'), 'utf8');
 
 describe('ci-local shard harness hardening', () => {
   test('does not splice the runner command with replacement-pattern semantics', () => {
@@ -40,5 +42,14 @@ describe('ci-local shard harness hardening', () => {
     expect(ciLocalSource).toContain('command -v python3');
     expect(ciLocalSource).toContain('command -v ps');
     expect(ciLocalSource).toContain('command -v crontab');
+  });
+
+  test('explicitly authorizes schema reset only in the Docker test databases', () => {
+    expect(ciLocalSource).toContain('GBRAIN_TEST_DB=1');
+    expect(runE2eSource).toContain('GBRAIN_TEST_DB) ;;');
+    expect(ciLocalSource).toContain('echo "$SELECTED" | env \\\n    GBRAIN_TEST_DB=1');
+    expect(schemaDriftSource).toContain(
+      'isSchemaDriftResetAllowed(DATABASE_URL!, process.env)',
+    );
   });
 });
