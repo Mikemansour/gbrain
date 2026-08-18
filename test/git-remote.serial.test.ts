@@ -31,7 +31,7 @@ function writeFakeGit(): void {
   // Per-invocation argv goes into argv.log (one JSON array per line).
   writeFileSync(FAKE_GIT_LOG, '');
   const script = `#!/usr/bin/env bash
-# Fake git for git-remote.test.ts
+# Fake git for git-remote.serial.test.ts
 { printf '['; for arg in "$@"; do printf '%s,' "$(printf '%s' "$arg" | jq -Rs .)"; done; printf 'null]\\n'; } >> "${FAKE_GIT_LOG}"
 mode=$(cat "${FAKE_GIT_MODE}" 2>/dev/null || echo ok)
 case "$mode" in
