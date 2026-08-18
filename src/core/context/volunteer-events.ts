@@ -20,7 +20,17 @@
 
 import type { BrainEngine } from './../engine.ts';
 import { registerBackgroundWorkDrainer } from '../background-work.ts';
-import { reflexPointerRationale } from './retrieval-reflex.ts';
+
+/**
+ * Canonical rationale template for a delivered reflex pointer. Kept here so
+ * retrieval-reflex can register its background write synchronously without a
+ * runtime import cycle.
+ */
+export function reflexPointerRationale(
+  p: Pick<import('./retrieval-reflex.ts').ReflexPointer, 'arm' | 'display'>,
+): string {
+  return `${p.arm} match "${p.display}"`;
+}
 
 export const VOLUNTEER_EVENTS_TTL_DAYS = 90;
 
