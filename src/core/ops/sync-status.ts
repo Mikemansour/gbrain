@@ -5,7 +5,43 @@
  * ../operations.ts. Never import from '../operations.ts' here (cycle).
  */
 
-import { OperationError, type Operation } from './contract.ts';
+import { OperationError, type Operation, type OperationContext } from './contract.ts';
+
+const POLARIS_CYCLE_CLIENT_ID =
+  'gbrain_cl_f876448e97e8ea6983d7c7d72411e04bca172ec0111874a9dc764d4791acd2e3';
+const POLARIS_CYCLE_CLIENT_NAME = 'polaris-cron-owner';
+
+/**
+ * This HTTP operation is the PGLite sole-owner maintenance lane. Admin scope
+ * alone is intentionally insufficient: other admin clients must not inherit a
+ * direct path around the protected cycle/subagent/budget gates.
+ */
+function assertProtectedCycleCaller(ctx: OperationContext): string {
+  const auth = ctx.auth;
+  const sourceId = ctx.sourceId;
+  const exactSourceGrant = typeof sourceId === 'string'
+    && sourceId.length > 0
+    && auth?.sourceId === sourceId
+    && Array.isArray(auth.allowedSources)
+    && auth.allowedSources.length === 1
+    && auth.allowedSources[0] === sourceId;
+
+  if (
+    ctx.remote !== true
+    || ctx.transport !== 'http'
+    || auth?.clientId !== POLARIS_CYCLE_CLIENT_ID
+    || auth.clientName !== POLARIS_CYCLE_CLIENT_NAME
+    || !auth.scopes.includes('admin')
+    || !exactSourceGrant
+  ) {
+    throw new OperationError(
+      'permission_denied',
+      'run_dream_cycle is restricted to the dedicated protected maintenance client with an exact single-source grant.',
+    );
+  }
+
+  return sourceId;
+}
 
 // --- Sync ---
 
@@ -44,7 +80,7 @@ const sync_brain: Operation = {
 const run_dream_cycle: Operation = {
   name: 'run_dream_cycle',
   description:
-    'Run the GBrain maintenance cycle inside the serving process. Uses only the configured/default source path; remote callers cannot supply a host filesystem path.',
+    'Run the GBrain maintenance cycle inside the serving process. Restricted to the deployment\'s dedicated protected-maintenance OAuth client and its exact single-source local_path.',
   params: {
     phases: {
       type: 'array',
@@ -57,6 +93,7 @@ const run_dream_cycle: Operation = {
   scope: 'admin',
   area: 'sync',
   handler: async (ctx, p) => {
+    const sourceId = assertProtectedCycleCaller(ctx);
     const { ALL_PHASES, runCycle } = await import('../cycle.ts');
     const requested = p.phases as unknown;
     let phases: (typeof ALL_PHASES)[number][] | undefined;
@@ -75,10 +112,15 @@ const run_dream_cycle: Operation = {
       phases = requested as (typeof ALL_PHASES)[number][];
     }
 
-    const { getDefaultSourcePath } = await import('../source-resolver.ts');
-    const brainDir = (await ctx.engine.getConfig('sync.repo_path'))
-      ?? (await getDefaultSourcePath(ctx.engine))
-      ?? null;
+    const source = (await ctx.engine.listAllSources({ localPathOnly: true }))
+      .find(candidate => candidate.id === sourceId);
+    if (!source?.local_path) {
+      throw new OperationError(
+        'permission_denied',
+        `The protected maintenance source "${sourceId}" has no active local_path on this host.`,
+      );
+    }
+    const brainDir = source.local_path;
     const yieldToLoop = async () => { await new Promise<void>((resolve) => setImmediate(resolve)); };
 
     return runCycle(ctx.engine, {
@@ -86,7 +128,7 @@ const run_dream_cycle: Operation = {
       dryRun: ctx.dryRun || (p.dry_run as boolean) || false,
       phases,
       pull: false,
-      sourceId: ctx.sourceId,
+      sourceId,
       yieldBetweenPhases: yieldToLoop,
       yieldDuringPhase: yieldToLoop,
     });

@@ -223,6 +223,15 @@ describe('hasScope — read-only token cannot satisfy write or admin scopes', ()
 });
 
 describe('run_dream_cycle — safe remote maintenance surface', () => {
+  const authorizedCycleAuth = {
+    token: 'fixture-token',
+    clientId: 'gbrain_cl_f876448e97e8ea6983d7c7d72411e04bca172ec0111874a9dc764d4791acd2e3',
+    clientName: 'polaris-cron-owner',
+    scopes: ['read', 'write', 'admin'],
+    sourceId: 'default',
+    allowedSources: ['default'],
+  };
+
   test('is HTTP-exposed, admin-scoped, and accepts no caller-controlled repo path', () => {
     const op = operations.find(candidate => candidate.name === 'run_dream_cycle');
 
@@ -238,8 +247,70 @@ describe('run_dream_cycle — safe remote maintenance surface', () => {
     expect(op).toBeDefined();
 
     await expect(
-      op!.handler(makeContext(), { phases: ['not-a-real-phase'] }),
+      op!.handler(makeContext({
+        transport: 'http',
+        auth: authorizedCycleAuth,
+      }), { phases: ['not-a-real-phase'] }),
     ).rejects.toThrow(/invalid.*phase|unknown.*phase/i);
+  });
+
+  test('rejects every OAuth client except the dedicated protected-maintenance client', async () => {
+    const op = operations.find(candidate => candidate.name === 'run_dream_cycle');
+    expect(op).toBeDefined();
+
+    await expect(
+      op!.handler(makeContext({
+        transport: 'http',
+        auth: {
+          ...authorizedCycleAuth,
+          clientId: 'gbrain_cl_unapproved',
+          clientName: 'other-admin',
+        },
+      }), { phases: ['orphans'], dry_run: true }),
+    ).rejects.toThrow(/protected maintenance client|permission_denied/i);
+  });
+
+  test('rejects source-grant widening or source mismatch', async () => {
+    const op = operations.find(candidate => candidate.name === 'run_dream_cycle');
+    expect(op).toBeDefined();
+
+    await expect(
+      op!.handler(makeContext({
+        transport: 'http',
+        sourceId: 'default',
+        auth: {
+          ...authorizedCycleAuth,
+          allowedSources: ['default', 'other-source'],
+        },
+      }), { phases: ['orphans'], dry_run: true }),
+    ).rejects.toThrow(/source grant|permission_denied/i);
+
+    await expect(
+      op!.handler(makeContext({
+        transport: 'http',
+        sourceId: 'other-source',
+        auth: authorizedCycleAuth,
+      }), { phases: ['orphans'], dry_run: true }),
+    ).rejects.toThrow(/source grant|permission_denied/i);
+  });
+
+  test('binds the scoped source id to that source row local_path, never global sync.repo_path', async () => {
+    const op = operations.find(candidate => candidate.name === 'run_dream_cycle');
+    expect(op).toBeDefined();
+
+    await engine.executeRaw(
+      `UPDATE sources SET local_path = $1 WHERE id = $2`,
+      ['/tmp/gbrain-authorized-source', 'default'],
+    );
+    await engine.setConfig('sync.repo_path', '/tmp/gbrain-wrong-global-source');
+
+    const report = await op!.handler(makeContext({
+      transport: 'http',
+      sourceId: 'default',
+      auth: authorizedCycleAuth,
+    }), { phases: ['orphans'], dry_run: true }) as { brain_dir: string | null };
+
+    expect(report.brain_dir).toBe('/tmp/gbrain-authorized-source');
   });
 });
 
