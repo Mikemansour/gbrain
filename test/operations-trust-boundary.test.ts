@@ -294,6 +294,44 @@ describe('run_dream_cycle — safe remote maintenance surface', () => {
     ).rejects.toThrow(/source grant|permission_denied/i);
   });
 
+  test('rejects non-PGLite engines before running privileged maintenance', async () => {
+    const op = operations.find(candidate => candidate.name === 'run_dream_cycle');
+    expect(op).toBeDefined();
+
+    const ctx = makeContext({
+      transport: 'http',
+      sourceId: 'default',
+      auth: authorizedCycleAuth,
+    });
+    ctx.engine = { kind: 'postgres' } as typeof ctx.engine;
+
+    await expect(
+      op!.handler(ctx, { phases: ['orphans'], dry_run: true }),
+    ).rejects.toThrow(/PGLite|permission_denied/i);
+  });
+
+  test('rejects a multi-source brain because global phases can cross source boundaries', async () => {
+    const op = operations.find(candidate => candidate.name === 'run_dream_cycle');
+    expect(op).toBeDefined();
+
+    await engine.executeRaw(
+      `UPDATE sources SET local_path = $1 WHERE id = $2`,
+      ['/tmp/gbrain-authorized-source', 'default'],
+    );
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path) VALUES ($1, $2, $3)`,
+      ['other-source', 'Other source', '/tmp/gbrain-other-source'],
+    );
+
+    await expect(
+      op!.handler(makeContext({
+        transport: 'http',
+        sourceId: 'default',
+        auth: authorizedCycleAuth,
+      }), { phases: ['orphans'], dry_run: true }),
+    ).rejects.toThrow(/single-source|source boundary|permission_denied/i);
+  });
+
   test('binds the scoped source id to that source row local_path, never global sync.repo_path', async () => {
     const op = operations.find(candidate => candidate.name === 'run_dream_cycle');
     expect(op).toBeDefined();
