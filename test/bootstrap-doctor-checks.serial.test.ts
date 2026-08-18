@@ -567,7 +567,11 @@ describe('bootstrap_durability_job [B7/D7]', () => {
     tmpDirs.push(fakeHome);
     const checks = await withEnv(
       { ...NEUTRAL_ENV, GBRAIN_HOME: parent, HOME: fakeHome },
-      () => bootstrapDoctorChecks(null),
+      // The CI gate itself runs in Docker. Pin the doctor probe to the local
+      // execution lane so this integration test still exercises the consented
+      // but missing-scheduler warning rather than correctly short-circuiting
+      // on Docker's /.dockerenv marker.
+      () => bootstrapDoctorChecks(null, { executionEnvironment: 'local' }),
     );
     const c = byName(checks, 'bootstrap_durability_job');
     expect(c?.status).toBe('warn');

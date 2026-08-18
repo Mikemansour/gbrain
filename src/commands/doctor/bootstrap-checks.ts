@@ -13,6 +13,7 @@ import { readHarnessReceiptState, readReceipt } from '../../core/bootstrap/forma
 import { probeLivePgliteHolder, resolveBrainDataDir } from '../../core/bootstrap/uninstall.ts';
 import { readRunbookStamp, hooksInstalled, listVerifyRuns } from '../../core/bootstrap/status.ts';
 import { resolveGbrainHome } from '../../core/gbrain-home.ts';
+import type { ExecutionEnvironment } from '../../core/execution-env.ts';
 import { VERSION as GBRAIN_BINARY_VERSION } from '../../version.ts';
 import type { Check } from '../doctor.ts';
 
@@ -24,7 +25,10 @@ import type { Check } from '../doctor.ts';
  * `gbrain bootstrap` get ZERO checks from this group. Every probe is
  * fail-soft: a broken telemetry file degrades to a warn, never a throw.
  */
-export async function bootstrapDoctorChecks(engine: BrainEngine | null): Promise<Check[]> {
+export async function bootstrapDoctorChecks(
+  engine: BrainEngine | null,
+  options: { executionEnvironment?: ExecutionEnvironment } = {},
+): Promise<Check[]> {
   const checks: Check[] = [];
   let home: string;
   try {
@@ -271,7 +275,7 @@ export async function bootstrapDoctorChecks(engine: BrainEngine | null): Promise
   try {
     if (ws !== null && receipt !== null) {
       const { detectExecutionEnvironment } = await import('../../core/execution-env.ts');
-      const envKind = detectExecutionEnvironment();
+      const envKind = options.executionEnvironment ?? detectExecutionEnvironment();
       if (envKind !== 'local') {
         // Answered BEFORE the subprocess probes — cloud/container doctor
         // runs must not pay launchctl/crontab spawns for an answer that is
