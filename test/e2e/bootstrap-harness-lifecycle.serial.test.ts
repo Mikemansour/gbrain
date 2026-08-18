@@ -73,6 +73,7 @@ describe('bootstrap harness lifecycle E2E (PGLite + real serve --http)', () => {
   const envFor = () => ({
     GBRAIN_HOME: parent,
     HOME: sandboxHome,
+    PATH: `${join(sandboxHome, 'bin')}:${process.env.PATH ?? ''}`,
     CLAUDE_CONFIG_DIR: join(sandboxHome, '.claude'),
     CODEX_HOME: codexHome,
     // The e2e lane exports DATABASE_URL; the IN-PROCESS runBootstrap calls
@@ -89,6 +90,10 @@ describe('bootstrap harness lifecycle E2E (PGLite + real serve --http)', () => {
     parent = mkdtempSync(join(tmpdir(), 'gb-harness-e2e-'));
     sandboxHome = mkdtempSync(join(tmpdir(), 'gb-harness-home-'));
     codexHome = mkdtempSync(join(tmpdir(), 'gb-harness-codex-'));
+    // applyHarness detects Claude with Bun.which(), outside the injected
+    // ExecRunner seam. Keep the E2E independent of the runner image's tools.
+    mkdirSync(join(sandboxHome, 'bin'), { recursive: true });
+    writeFileSync(join(sandboxHome, 'bin', 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     // codex "installed" for detection purposes: the config file exists.
     writeFileSync(codexConfig(), '# preexisting codex config\nmodel = "o5"\n');
 

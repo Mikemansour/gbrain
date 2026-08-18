@@ -42,10 +42,21 @@ import {
   embeddingMismatchMessage,
 } from '../../src/core/embedding-dim-check.ts';
 
+async function connectWithoutSnapshot(engine: PGLiteEngine): Promise<void> {
+  const savedSnapshot = process.env.GBRAIN_PGLITE_SNAPSHOT;
+  delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+  try {
+    await engine.connect({});
+  } finally {
+    if (savedSnapshot === undefined) delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+    else process.env.GBRAIN_PGLITE_SNAPSHOT = savedSnapshot;
+  }
+}
+
 describe('v0.28.5 cluster A — PGLite upgrade wedge regression', () => {
   test('pre-v0.20 brain (missing v0.20+v0.26.3+v0.27 columns) re-runs initSchema cleanly', async () => {
     const engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     try {
       // Build a fresh LATEST brain.
       await engine.initSchema();
@@ -130,7 +141,7 @@ describe('v0.28.5 cluster A — PGLite upgrade wedge regression', () => {
   test('hasPendingMigrations correctly reports state across the upgrade lifecycle', async () => {
     const { hasPendingMigrations } = await import('../../src/core/migrate.ts');
     const engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     try {
       // Fresh brain → no version row yet → defensive true.
       expect(await hasPendingMigrations(engine)).toBe(true);

@@ -254,6 +254,16 @@ echo \"[runner] Tier 3: PGLite snapshot fixture (idempotent; rebuilds on hash dr
 # warn+slow path). Concurrency-safe via the script's mkdir lock (D5.8).
 bun run build:pglite-snapshot
 export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
+echo \"[runner] process-isolated serial unit tests (once before sharding)\"
+serial_root=/tmp/gbrain-ci-serial
+rm -rf \$serial_root
+mkdir -p \$serial_root/home \$serial_root/tmp
+setpriv --bounding-set=-dac_override,-dac_read_search \
+  --inh-caps=-dac_override,-dac_read_search \
+  --ambient-caps=-dac_override,-dac_read_search \
+  env -u DATABASE_URL \
+  HOME=\$serial_root/home TMPDIR=\$serial_root/tmp GBRAIN_SERIAL_POOL=1 \
+  bash scripts/run-serial-tests.sh 2>&1 | tee /evidence/serial.log
 echo \"[runner] resolving E2E file selection (--diff aware)\"
 ${DIFF_E2E_PREP}
 echo \"[runner] Tier 1: 4-shard parallel unit + E2E (xargs -P4)\"
