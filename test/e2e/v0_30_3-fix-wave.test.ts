@@ -28,10 +28,21 @@ import { describe, test, expect } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { LATEST_VERSION } from '../../src/core/migrate.ts';
 
+async function connectWithoutSnapshot(engine: PGLiteEngine): Promise<void> {
+  const savedSnapshot = process.env.GBRAIN_PGLITE_SNAPSHOT;
+  delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+  try {
+    await engine.connect({});
+  } finally {
+    if (savedSnapshot === undefined) delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+    else process.env.GBRAIN_PGLITE_SNAPSHOT = savedSnapshot;
+  }
+}
+
 describe('v0.30.3 wave — pre-v39/v40/v41 forward-reference bootstrap (#741)', () => {
   test('pre-v39 brain (missing modality + embedding_image) re-runs initSchema cleanly', async () => {
     const engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     try {
       await engine.initSchema();
       const db = (engine as any).db;
@@ -71,7 +82,7 @@ describe('v0.30.3 wave — pre-v39/v40/v41 forward-reference bootstrap (#741)', 
 
   test('pre-v40 brain (missing emotional_weight + effective_date) re-runs initSchema cleanly', async () => {
     const engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     try {
       await engine.initSchema();
       const db = (engine as any).db;
@@ -108,7 +119,7 @@ describe('v0.30.3 wave — pre-v39/v40/v41 forward-reference bootstrap (#741)', 
 
   test('pre-v41 PGLite brain (missing import_filename + salience_touched_at) re-runs initSchema cleanly', async () => {
     const engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     try {
       await engine.initSchema();
       const db = (engine as any).db;
@@ -146,7 +157,7 @@ describe('v0.30.3 wave — pre-v39/v40/v41 forward-reference bootstrap (#741)', 
     // multiple bootstrap forward-reference gaps compounded. This is the
     // headline upgrade-path claim in the v0.30.3 release notes.
     const engine = new PGLiteEngine();
-    await engine.connect({});
+    await connectWithoutSnapshot(engine);
     try {
       await engine.initSchema();
       const db = (engine as any).db;
