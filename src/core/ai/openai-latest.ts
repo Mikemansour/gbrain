@@ -246,6 +246,11 @@ function writeCacheFile(next: ModelCacheFile): void {
   const tmp = `${path}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(next, null, 2));
   renameSync(tmp, path);
+  // Publish the just-written value to this process immediately. mtimeMs alone
+  // is not a safe invalidator for two atomic replacements in the same tick —
+  // the second rename can preserve the observed mtime and leave the memo
+  // serving the previous account's tiers.
+  _cacheMemo = { path, mtimeMs: statSync(path).mtimeMs, value: next };
 }
 
 /**
